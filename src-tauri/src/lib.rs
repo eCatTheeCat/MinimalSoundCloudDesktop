@@ -1,4 +1,4 @@
-use tauri::{Listener, Manager};
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -87,15 +87,12 @@ pub fn run() {
             .build(),
         )?;
       }
-
-      if let Some(main) = app.get_webview_window("main") {
-        let script = OVERLAY_SCRIPT.to_string();
-        main.clone().listen("tauri://page-load", move |_| {
-          let _ = main.eval(script.as_str());
-        });
-      }
-
       Ok(())
+    })
+    .on_page_load(|window, _payload| {
+      let script = OVERLAY_SCRIPT;
+      // Fire-and-forget; CSP does not block eval() injected via Tauri.
+      let _ = window.eval(script);
     })
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
