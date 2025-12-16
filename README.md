@@ -1,0 +1,2 @@
+# MinimalSoundCloudDesktop
+SoundCloud Desktop app
