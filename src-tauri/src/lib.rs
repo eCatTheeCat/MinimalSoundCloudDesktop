@@ -1,7 +1,6 @@
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-  // Lightweight overlay injected into the SoundCloud page to prove we can
-  // render UI elements even when loading a remote site directly.
+  // Overlay injected into the SoundCloud page; stays thin and reserves space so it does not cover content.
   const OVERLAY_SCRIPT: &str = r#"
     (() => {
       if (window.__minimal_sc_overlay_installed) return;
@@ -11,8 +10,10 @@ pub fn run() {
         const host = document.createElement('div');
         host.id = 'mscd-overlay-host';
         host.style.position = 'fixed';
-        host.style.top = '10px';
-        host.style.right = '10px';
+        host.style.top = '0';
+        host.style.left = '0';
+        host.style.right = '0';
+        host.style.padding = '8px 8px 0 8px';
         host.style.zIndex = '2147483647';
         host.style.pointerEvents = 'none';
         document.body.appendChild(host);
@@ -21,39 +22,29 @@ pub fn run() {
 
         const style = document.createElement('style');
         style.textContent = `
-          :host {
-            all: initial;
-          }
+          :host { all: initial; }
           * { box-sizing: border-box; }
           .shell {
+            width: 100%;
             pointer-events: auto;
             display: flex;
             align-items: center;
-            gap: 8px;
-            padding: 8px 10px;
-            background: rgba(10, 12, 18, 0.92);
+            justify-content: space-between;
+            gap: 10px;
+            padding: 8px 12px;
+            min-height: 44px;
+            background: rgba(12, 14, 20, 0.96);
             border: 1px solid rgba(255,255,255,0.12);
-            border-radius: 12px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.35);
-            backdrop-filter: blur(8px);
+            border-radius: 10px;
+            box-shadow: 0 12px 26px rgba(0,0,0,0.25);
+            backdrop-filter: blur(7px);
             color: #e9ecf5;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
           }
-          .pill {
-            padding: 4px 8px;
-            border-radius: 999px;
-            background: rgba(255, 194, 74, 0.12);
-            border: 1px solid rgba(255, 194, 74, 0.28);
-            color: #ffc24a;
-            font-size: 12px;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-            white-space: nowrap;
-          }
-          .actions {
-            display: flex;
-            gap: 8px;
-          }
+          .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+          .title { font-weight: 700; white-space: nowrap; }
+          .muted { color: #a7acb8; font-size: 12px; white-space: nowrap; }
+          .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
           button {
             height: 32px;
             padding: 0 12px;
@@ -79,10 +70,7 @@ pub fn run() {
             padding: 16px;
             pointer-events: none;
           }
-          .modal-backdrop.open {
-            display: flex;
-            pointer-events: auto;
-          }
+          .modal-backdrop.open { display: flex; pointer-events: auto; }
           .modal {
             width: min(520px, 96vw);
             background: #0f131c;
@@ -96,47 +84,32 @@ pub fn run() {
             gap: 14px;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
           }
-          .row {
-            display: flex;
-            justify-content: space-between;
-            gap: 8px;
-            align-items: center;
-          }
+          .row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
           .row + .row { margin-top: 4px; }
           .muted { color: #a7acb8; font-size: 13px; }
-          .toggle {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-          }
-          .toggle input {
-            accent-color: #3c57ff;
-          }
-          .slider {
-            width: 160px;
-          }
-          .section h3 {
-            margin: 0;
-            font-size: 15px;
-          }
+          .toggle { display: flex; align-items: center; gap: 8px; }
+          .toggle input { accent-color: #3c57ff; }
+          .slider-wrapper { display: inline-flex; align-items: center; gap: 8px; min-width: 170px; }
+          .slider { width: 140px; }
+          .section h3 { margin: 0; font-size: 15px; }
           .section {
             border: 1px solid rgba(255,255,255,0.08);
             border-radius: 10px;
             padding: 12px;
             background: rgba(255,255,255,0.03);
           }
-          .modal header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 8px;
-          }
-          .close {
-            height: 32px;
-            padding: 0 10px;
-          }
+          .modal header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+          .close { height: 32px; padding: 0 10px; }
         `;
         shadow.appendChild(style);
+
+        const offsetId = 'mscd-offset-style';
+        if (!document.getElementById(offsetId)) {
+          const s = document.createElement('style');
+          s.id = offsetId;
+          s.textContent = 'body { padding-top: 48px !important; }';
+          document.head.appendChild(s);
+        }
 
         let settingsOpen = false;
         let darkMode = true;
@@ -144,24 +117,28 @@ pub fn run() {
         const shell = document.createElement('div');
         shell.className = 'shell';
 
-        const pill = document.createElement('span');
-        pill.className = 'pill';
-        pill.textContent = 'Minimal SC Desktop';
+        const brand = document.createElement('div');
+        brand.className = 'brand';
+        const title = document.createElement('span');
+        title.className = 'title';
+        title.textContent = 'Minimal SC Desktop';
+        const status = document.createElement('span');
+        status.className = 'muted';
+        status.textContent = 'Ad-free - Scrobbling-ready';
+        brand.append(title, status);
 
         const actions = document.createElement('div');
         actions.className = 'actions';
 
         const btnSettings = document.createElement('button');
         btnSettings.textContent = 'Settings';
-
         const btnDark = document.createElement('button');
         btnDark.textContent = 'Dark mode';
-
         const btnTray = document.createElement('button');
         btnTray.textContent = 'Minimize to tray';
 
         actions.append(btnSettings, btnDark, btnTray);
-        shell.append(pill, actions);
+        shell.append(brand, actions);
 
         const backdrop = document.createElement('div');
         backdrop.className = 'modal-backdrop';
@@ -183,10 +160,10 @@ pub fn run() {
         s1Title.textContent = 'Playback & Ads';
         const adRow = document.createElement('div');
         adRow.className = 'row';
-        adRow.innerHTML = `<span>Skip audio ads</span><label class="toggle"><input type="checkbox" checked /></label>`;
+        adRow.innerHTML = '<span>Skip audio ads</span><label class=\"toggle\"><input type=\"checkbox\" checked /></label>';
         const promoRow = document.createElement('div');
         promoRow.className = 'row';
-        promoRow.innerHTML = `<span>Skip promoted tracks</span><label class="toggle"><input type="checkbox" checked /></label>`;
+        promoRow.innerHTML = '<span>Skip promoted tracks</span><label class=\"toggle\"><input type=\"checkbox\" checked /></label>';
         secPlayback.append(s1Title, adRow, promoRow);
 
         const secScrobble = document.createElement('div');
@@ -197,17 +174,17 @@ pub fn run() {
         thresholdRow.className = 'row';
         thresholdRow.innerHTML = `
           <span>Scrobble threshold</span>
-          <div class="toggle">
+          <div class="toggle slider-wrapper">
             <input class="slider" type="range" min="1" max="100" value="50" />
-            <span class="muted" id="mscd-threshold-label">50%</span>
+            <span class="muted" id="mscd-threshold-label" style="min-width: 36px; display: inline-block; text-align: right;">50%</span>
           </div>
         `;
         const nowPlayingRow = document.createElement('div');
         nowPlayingRow.className = 'row';
-        nowPlayingRow.innerHTML = `<span>Send "Now Playing"</span><label class="toggle"><input type="checkbox" checked /></label>`;
+        nowPlayingRow.innerHTML = '<span>Send "Now Playing"</span><label class=\"toggle\"><input type=\"checkbox\" checked /></label>';
         const notifyRow = document.createElement('div');
         notifyRow.className = 'row';
-        notifyRow.innerHTML = `<span>Show scrobble notifications</span><label class="toggle"><input type="checkbox" checked /></label>`;
+        notifyRow.innerHTML = '<span>Show scrobble notifications</span><label class=\"toggle\"><input type=\"checkbox\" checked /></label>';
         secScrobble.append(s2Title, thresholdRow, nowPlayingRow, notifyRow);
 
         const secLastfm = document.createElement('div');
@@ -216,7 +193,7 @@ pub fn run() {
         s3Title.textContent = 'Last.fm';
         const lfRow = document.createElement('div');
         lfRow.className = 'row';
-        lfRow.innerHTML = `<span>Status: <strong>Not connected</strong></span><button>Connect</button>`;
+        lfRow.innerHTML = '<span>Status: <strong>Not connected</strong></span><button>Connect</button>';
         secLastfm.append(s3Title, lfRow);
 
         modal.append(header, secPlayback, secScrobble, secLastfm);
@@ -265,10 +242,8 @@ pub fn run() {
       }
       Ok(())
     })
-    .on_page_load(|window, _payload| {
-      let script = OVERLAY_SCRIPT;
-      // Fire-and-forget; CSP does not block eval() injected via Tauri.
-      let _ = window.eval(script);
+    .on_page_load(|window, _| {
+      let _ = window.eval(OVERLAY_SCRIPT);
     })
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
