@@ -1,6 +1,7 @@
 # MinimalSoundCloudDesktop
 
-Lightweight Tauri wrapper for SoundCloud with ad-free playback and Last.fm scrobbling (currently scaffolded).
+Lightweight Tauri wrapper for SoundCloud with ad-free playback and Last.fm scrobbling.
+**Note: Currently nothing is working right now. I have no experience with Tauri or Rust in general, so a lot of this is AI code.**
 
 ## Getting started
 
