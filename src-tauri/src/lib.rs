@@ -1,7 +1,10 @@
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-  // Overlay injected into the SoundCloud page; stays thin and reserves space so it does not cover content.
-  const OVERLAY_SCRIPT: &str = r#"
+fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
+  let auth_url = format!(
+    "https://www.last.fm/api/auth/?api_key={}&cb={}",
+    lastfm_key, lastfm_callback
+  );
+
+  let template = r#"
     (() => {
       if (window.__minimal_sc_overlay_installed) return;
       window.__minimal_sc_overlay_installed = true;
@@ -100,6 +103,7 @@ pub fn run() {
           }
           .modal header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
           .close { height: 32px; padding: 0 10px; }
+          .warning { color: #ffb95f; font-size: 12px; }
         `;
         shadow.appendChild(style);
 
@@ -160,10 +164,10 @@ pub fn run() {
         s1Title.textContent = 'Playback & Ads';
         const adRow = document.createElement('div');
         adRow.className = 'row';
-        adRow.innerHTML = '<span>Skip audio ads</span><label class=\"toggle\"><input type=\"checkbox\" checked /></label>';
+        adRow.innerHTML = '<span>Skip audio ads</span><label class="toggle"><input type="checkbox" checked /></label>';
         const promoRow = document.createElement('div');
         promoRow.className = 'row';
-        promoRow.innerHTML = '<span>Skip promoted tracks</span><label class=\"toggle\"><input type=\"checkbox\" checked /></label>';
+        promoRow.innerHTML = '<span>Skip promoted tracks</span><label class="toggle"><input type="checkbox" checked /></label>';
         secPlayback.append(s1Title, adRow, promoRow);
 
         const secScrobble = document.createElement('div');
@@ -181,10 +185,10 @@ pub fn run() {
         `;
         const nowPlayingRow = document.createElement('div');
         nowPlayingRow.className = 'row';
-        nowPlayingRow.innerHTML = '<span>Send "Now Playing"</span><label class=\"toggle\"><input type=\"checkbox\" checked /></label>';
+        nowPlayingRow.innerHTML = '<span>Send "Now Playing"</span><label class="toggle"><input type="checkbox" checked /></label>';
         const notifyRow = document.createElement('div');
         notifyRow.className = 'row';
-        notifyRow.innerHTML = '<span>Show scrobble notifications</span><label class=\"toggle\"><input type=\"checkbox\" checked /></label>';
+        notifyRow.innerHTML = '<span>Show scrobble notifications</span><label class="toggle"><input type="checkbox" checked /></label>';
         secScrobble.append(s2Title, thresholdRow, nowPlayingRow, notifyRow);
 
         const secLastfm = document.createElement('div');
@@ -193,8 +197,20 @@ pub fn run() {
         s3Title.textContent = 'Last.fm';
         const lfRow = document.createElement('div');
         lfRow.className = 'row';
-        lfRow.innerHTML = '<span>Status: <strong>Not connected</strong></span><button>Connect</button>';
-        secLastfm.append(s3Title, lfRow);
+        const keyMissing = '{key}' === 'REPLACE_ME';
+        const warn = keyMissing ? '<div class="warning">Set LASTFM_API_KEY & LASTFM_CALLBACK to enable auth.</div>' : '';
+        const disabledAttr = keyMissing ? 'disabled' : '';
+        const authUrl = '{auth_url}';
+        lfRow.innerHTML = `
+          <span>Status: <strong>Not connected</strong></span>
+          <div class="toggle" style="gap:12px;">
+            <button id="mscd-lastfm-connect" ${disabledAttr}>Connect in browser</button>
+          </div>
+        ` + warn;
+        const authInfo = document.createElement('div');
+        authInfo.className = 'muted';
+        authInfo.textContent = 'Auth URL: {auth_url}';
+        secLastfm.append(s3Title, lfRow, authInfo);
 
         modal.append(header, secPlayback, secScrobble, secLastfm);
         backdrop.appendChild(modal);
@@ -217,6 +233,20 @@ pub fn run() {
         };
         btnTray.onclick = () => alert('Minimize to tray (placeholder)');
 
+        const connectBtn = document.getElementById('mscd-lastfm-connect');
+        connectBtn?.addEventListener('click', () => {
+          if (keyMissing) return;
+          try {
+            if (window.__TAURI__?.invoke) {
+              window.__TAURI__.invoke('plugin:opener|open', { path: authUrl, new: true });
+              return;
+            }
+          } catch (e) {
+            console.warn('TAURI shell unavailable, falling back to window.open', e);
+          }
+          window.open(authUrl, '_blank', 'noreferrer');
+        });
+
         const slider = thresholdRow.querySelector('.slider');
         const label = thresholdRow.querySelector('#mscd-threshold-label');
         slider?.addEventListener('input', () => {
@@ -229,7 +259,18 @@ pub fn run() {
       const ready = () => document.body ? inject() : setTimeout(ready, 50);
       ready();
     })();
-  "#;
+    "#;
+
+  template
+    .replace("{auth_url}", &auth_url)
+    .replace("{key}", lastfm_key)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+  let lastfm_key = option_env!("LASTFM_API_KEY").unwrap_or("fca939e737410506a2c49ec7ee49ba68");
+  let lastfm_callback = option_env!("LASTFM_CALLBACK").unwrap_or("mscd://lastfm-callback");
+  let script = build_overlay_script(lastfm_key, lastfm_callback);
 
   tauri::Builder::default()
     .setup(|app| {
@@ -240,10 +281,11 @@ pub fn run() {
             .build(),
         )?;
       }
+      app.handle().plugin(tauri_plugin_opener::init());
       Ok(())
     })
-    .on_page_load(|window, _| {
-      let _ = window.eval(OVERLAY_SCRIPT);
+    .on_page_load(move |window, _| {
+      let _ = window.eval(&script);
     })
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
