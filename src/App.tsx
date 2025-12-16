@@ -1,33 +1,66 @@
+import { useState } from 'react'
 import './App.css'
 
-const checklist = [
-  'Tauri + React shell scaffolded',
-  'Run `npm run tauri:dev` to launch the desktop shell',
-  'App window + tray + settings modal to be added next',
-]
+type IconButtonProps = {
+  label: string
+  onClick?: () => void
+}
+
+function IconButton({ label, onClick }: IconButtonProps) {
+  return (
+    <button className="icon-button" onClick={onClick} type="button">
+      {label}
+    </button>
+  )
+}
 
 function App() {
+  const [isSettingsOpen, setSettingsOpen] = useState(false)
+
   return (
-    <main className="app">
-      <header className="hero">
-        <p className="eyebrow">Minimal SoundCloud Desktop</p>
-        <h1>Wrapper shell is ready</h1>
-        <p className="lede">
-          This build is the starting point for the ad-free SoundCloud wrapper with
-          Last.fm scrobbling. Next steps live here in the React layer; the Tauri
-          backend is already wired up.
-        </p>
+    <div className="app-shell">
+      <header className="ribbon">
+        <div className="brand">
+          <span className="pill">Beta scaffold</span>
+          <span className="title">Minimal SoundCloud Desktop</span>
+        </div>
+        <div className="ribbon-actions">
+          <IconButton label="Dark mode" />
+          <IconButton label="Settings" onClick={() => setSettingsOpen(true)} />
+          <IconButton label="Minimize to tray" />
+        </div>
       </header>
 
-      <section className="card">
-        <h2>What&apos;s in this scaffold</h2>
-        <ul className="list">
-          {checklist.map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ul>
-      </section>
-    </main>
+      <main className="main-surface">
+        <iframe
+          title="SoundCloud"
+          src="https://soundcloud.com"
+          className="sc-frame"
+          allow="autoplay; clipboard-write; encrypted-media"
+        />
+      </main>
+
+      {isSettingsOpen ? (
+        <div className="modal-backdrop" onClick={() => setSettingsOpen(false)}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Settings (placeholder)"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2>Settings</h2>
+            <p className="muted">
+              Settings modal placeholder. This will host ad-block toggles, promoted-track skipping,
+              Last.fm auth, scrobble threshold, notifications, and dark mode controls.
+            </p>
+            <button className="primary" type="button" onClick={() => setSettingsOpen(false)}>
+              Close
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
   )
 }
 
