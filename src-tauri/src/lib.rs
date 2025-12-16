@@ -233,13 +233,24 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
         };
         btnTray.onclick = () => alert('Minimize to tray (placeholder)');
 
+        console.log(shadow);
+        console.log(document);
+
         const connectBtn = document.getElementById('mscd-lastfm-connect');
+        console.info('[MSCD] Connect button present:', !!connectBtn, 'key missing:', keyMissing);
         connectBtn?.addEventListener('click', () => {
-          if (keyMissing) return;
+          console.info('[MSCD] Connect clicked');
+          if (keyMissing) {
+            console.warn('[MSCD] Key missing; connect disabled');
+            return;
+          }
           try {
             if (window.__TAURI__?.invoke) {
+              console.info('[MSCD] Opening via opener plugin', authUrl);
               window.__TAURI__.invoke('plugin:opener|open', { path: authUrl, new: true });
               return;
+            } else {
+              console.warn('[MSCD] __TAURI__.invoke unavailable; falling back to window.open');
             }
           } catch (e) {
             console.warn('TAURI shell unavailable, falling back to window.open', e);
@@ -275,13 +286,13 @@ pub fn run() {
   tauri::Builder::default()
     .setup(|app| {
       if cfg!(debug_assertions) {
-        app.handle().plugin(
+        let _ = app.handle().plugin(
           tauri_plugin_log::Builder::default()
             .level(log::LevelFilter::Info)
             .build(),
         )?;
       }
-      app.handle().plugin(tauri_plugin_opener::init());
+      let _ = app.handle().plugin(tauri_plugin_opener::init());
       Ok(())
     })
     .on_page_load(move |window, _| {
