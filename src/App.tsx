@@ -1,6 +1,5 @@
-import { useRef, useState } from 'react'
+import { useState } from 'react'
 import './App.css'
-import { useSoundcloudWebview } from './hooks/useSoundcloudWebview'
 
 type IconButtonProps = {
   label: string
@@ -17,9 +16,6 @@ function IconButton({ label, onClick }: IconButtonProps) {
 
 function App() {
   const [isSettingsOpen, setSettingsOpen] = useState(false)
-  const frameRef = useRef<HTMLDivElement | null>(null)
-
-  useSoundcloudWebview(frameRef)
 
   return (
     <div className="app-shell">
@@ -36,7 +32,12 @@ function App() {
       </header>
 
       <main className="main-surface">
-        <div className="webview-host" ref={frameRef} />
+        <iframe
+          title="SoundCloud"
+          src="https://soundcloud.com"
+          className="sc-frame"
+          allow="autoplay; clipboard-write; encrypted-media"
+        />
       </main>
 
       {isSettingsOpen ? (
