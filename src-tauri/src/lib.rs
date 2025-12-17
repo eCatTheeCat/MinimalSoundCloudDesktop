@@ -81,7 +81,7 @@ fn lastfm_callback() -> String {
   }
 }
 
-fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
+fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str) -> String {
   let auth_url = format!(
     "https://www.last.fm/api/auth/?api_key={}&cb={}",
     lastfm_key, lastfm_callback
@@ -221,7 +221,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
         title.textContent = 'Minimal SC Desktop';
         const status = document.createElement('span');
         status.className = 'muted';
-        status.textContent = 'Ad-free - Scrobbling-ready';
+        status.textContent = 'v{version}';
         brand.append(title, status);
 
         const actions = document.createElement('div');
@@ -506,6 +506,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
   template
     .replace("{auth_url}", &auth_url)
     .replace("{key}", lastfm_key)
+    .replace("{version}", version)
 }
 
 fn get_store(app: &tauri::AppHandle) -> Result<Arc<Store<tauri::Wry>>, String> {
@@ -697,7 +698,13 @@ fn start_dev_callback_server(app: tauri::AppHandle) {
 pub fn run() {
   let key_for_overlay = lastfm_key().unwrap_or_else(|| "REPLACE_ME".to_string());
   let lastfm_cb = lastfm_callback();
-  let script = build_overlay_script(&key_for_overlay, &lastfm_cb);
+  let context = tauri::generate_context!();
+  let version = context
+    .config()
+    .version
+    .clone()
+    .unwrap_or_else(|| "0.0.0".to_string());
+  let script = build_overlay_script(&key_for_overlay, &lastfm_cb, &version);
 
   let mut builder = tauri::Builder::default();
 
@@ -782,6 +789,6 @@ pub fn run() {
     });
 
   builder
-    .run(tauri::generate_context!())
+    .run(context)
     .expect("error while running tauri application");
 }
