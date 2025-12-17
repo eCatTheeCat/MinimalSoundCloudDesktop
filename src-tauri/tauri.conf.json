@@ -10,6 +10,10 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
+    "withGlobalTauri": true,
+    "security": {
+    "csp": null
+    },
     "windows": [
       {
         "title": "Minimal SoundCloud Desktop",
@@ -21,10 +25,7 @@
         "fullscreen": false,
         "url": "https://soundcloud.com"
       }
-    ],
-    "security": {
-      "csp": null
-    }
+    ]
   },
   "bundle": {
     "active": true,

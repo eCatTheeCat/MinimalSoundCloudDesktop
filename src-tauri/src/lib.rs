@@ -158,59 +158,111 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
         btnClose.textContent = 'Close';
         header.append(h2, btnClose);
 
+        const makeToggleRow = (labelText, checked = true) => {
+          const row = document.createElement('div');
+          row.className = 'row';
+          const label = document.createElement('span');
+          label.textContent = labelText;
+          const wrap = document.createElement('label');
+          wrap.className = 'toggle';
+          const input = document.createElement('input');
+          input.type = 'checkbox';
+          input.checked = !!checked;
+          wrap.appendChild(input);
+          row.append(label, wrap);
+          return { row, input };
+        };
+
+        const makeSliderRow = () => {
+          const row = document.createElement('div');
+          row.className = 'row';
+          const label = document.createElement('span');
+          label.textContent = 'Scrobble threshold';
+
+          const wrap = document.createElement('div');
+          wrap.className = 'toggle slider-wrapper';
+
+          const slider = document.createElement('input');
+          slider.type = 'range';
+          slider.min = '1';
+          slider.max = '100';
+          slider.value = '50';
+          slider.className = 'slider';
+
+          const val = document.createElement('span');
+          val.className = 'muted';
+          val.id = 'mscd-threshold-label';
+          val.style.minWidth = '36px';
+          val.style.display = 'inline-block';
+          val.style.textAlign = 'right';
+          val.textContent = '50%';
+
+          wrap.append(slider, val);
+          row.append(label, wrap);
+          return { row, slider, val };
+        };
+
+        const makeLastfmRow = (authUrl, keyMissing, warnText) => {
+          const row = document.createElement('div');
+          row.className = 'row';
+
+          const statusWrap = document.createElement('span');
+          statusWrap.innerHTML = 'Status: <strong>Not connected</strong>';
+
+          const toggleWrap = document.createElement('div');
+          toggleWrap.className = 'toggle';
+          toggleWrap.style.gap = '12px';
+
+          const btn = document.createElement('button');
+          btn.id = 'mscd-lastfm-connect';
+          btn.textContent = 'Connect in browser';
+          if (keyMissing) btn.disabled = true;
+
+          toggleWrap.append(btn);
+          row.append(statusWrap, toggleWrap);
+
+          let warnNode = null;
+          if (warnText) {
+            warnNode = document.createElement('div');
+            warnNode.className = 'warning';
+            warnNode.textContent = warnText;
+          }
+
+          const authInfo = document.createElement('div');
+          authInfo.className = 'muted';
+          authInfo.textContent = `Auth URL: ${authUrl}`;
+
+          return { row, btn, warnNode, authInfo };
+        };
+
         const secPlayback = document.createElement('div');
         secPlayback.className = 'section';
         const s1Title = document.createElement('h3');
         s1Title.textContent = 'Playback & Ads';
-        const adRow = document.createElement('div');
-        adRow.className = 'row';
-        adRow.innerHTML = '<span>Skip audio ads</span><label class="toggle"><input type="checkbox" checked /></label>';
-        const promoRow = document.createElement('div');
-        promoRow.className = 'row';
-        promoRow.innerHTML = '<span>Skip promoted tracks</span><label class="toggle"><input type="checkbox" checked /></label>';
-        secPlayback.append(s1Title, adRow, promoRow);
+        const adRow = makeToggleRow('Skip audio ads');
+        const promoRow = makeToggleRow('Skip promoted tracks');
+        secPlayback.append(s1Title, adRow.row, promoRow.row);
 
         const secScrobble = document.createElement('div');
         secScrobble.className = 'section';
         const s2Title = document.createElement('h3');
         s2Title.textContent = 'Scrobbling';
-        const thresholdRow = document.createElement('div');
-        thresholdRow.className = 'row';
-        thresholdRow.innerHTML = `
-          <span>Scrobble threshold</span>
-          <div class="toggle slider-wrapper">
-            <input class="slider" type="range" min="1" max="100" value="50" />
-            <span class="muted" id="mscd-threshold-label" style="min-width: 36px; display: inline-block; text-align: right;">50%</span>
-          </div>
-        `;
-        const nowPlayingRow = document.createElement('div');
-        nowPlayingRow.className = 'row';
-        nowPlayingRow.innerHTML = '<span>Send "Now Playing"</span><label class="toggle"><input type="checkbox" checked /></label>';
-        const notifyRow = document.createElement('div');
-        notifyRow.className = 'row';
-        notifyRow.innerHTML = '<span>Show scrobble notifications</span><label class="toggle"><input type="checkbox" checked /></label>';
-        secScrobble.append(s2Title, thresholdRow, nowPlayingRow, notifyRow);
+        const thresholdRow = makeSliderRow();
+        const nowPlayingRow = makeToggleRow('Send "Now Playing"');
+        const notifyRow = makeToggleRow('Show scrobble notifications');
+        secScrobble.append(s2Title, thresholdRow.row, nowPlayingRow.row, notifyRow.row);
 
         const secLastfm = document.createElement('div');
         secLastfm.className = 'section';
         const s3Title = document.createElement('h3');
         s3Title.textContent = 'Last.fm';
-        const lfRow = document.createElement('div');
-        lfRow.className = 'row';
         const keyMissing = '{key}' === 'REPLACE_ME';
-        const warn = keyMissing ? '<div class="warning">Set LASTFM_API_KEY & LASTFM_CALLBACK to enable auth.</div>' : '';
-        const disabledAttr = keyMissing ? 'disabled' : '';
         const authUrl = '{auth_url}';
-        lfRow.innerHTML = `
-          <span>Status: <strong>Not connected</strong></span>
-          <div class="toggle" style="gap:12px;">
-            <button id="mscd-lastfm-connect" ${disabledAttr}>Connect in browser</button>
-          </div>
-        ` + warn;
-        const authInfo = document.createElement('div');
-        authInfo.className = 'muted';
-        authInfo.textContent = 'Auth URL: {auth_url}';
-        secLastfm.append(s3Title, lfRow, authInfo);
+        const warnText = keyMissing ? 'Set LASTFM_API_KEY & LASTFM_CALLBACK to enable auth.' : '';
+        const lf = makeLastfmRow(authUrl, keyMissing, warnText);
+        secLastfm.append(s3Title, lf.row);
+        if (lf.warnNode) secLastfm.append(lf.warnNode);
+        secLastfm.append(lf.authInfo);
 
         modal.append(header, secPlayback, secScrobble, secLastfm);
         backdrop.appendChild(modal);
@@ -233,10 +285,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
         };
         btnTray.onclick = () => alert('Minimize to tray (placeholder)');
 
-        console.log(shadow);
-        console.log(document);
-
-        const connectBtn = document.getElementById('mscd-lastfm-connect');
+        const connectBtn = lf.btn;
         console.info('[MSCD] Connect button present:', !!connectBtn, 'key missing:', keyMissing);
         connectBtn?.addEventListener('click', () => {
           console.info('[MSCD] Connect clicked');
@@ -244,10 +293,36 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
             console.warn('[MSCD] Key missing; connect disabled');
             return;
           }
+
+          const fallbackOpen = () => {
+            const opened = window.open(authUrl, '_blank', 'noopener,noreferrer');
+            if (!opened) {
+              console.warn('[MSCD] window.open blocked, trying anchor click');
+              const anchor = document.createElement('a');
+              anchor.href = authUrl;
+              anchor.target = '_blank';
+              anchor.rel = 'noopener noreferrer';
+              shadow.appendChild(anchor);
+              anchor.click();
+              shadow.removeChild(anchor);
+            }
+            if (!opened) {
+              console.warn('[MSCD] Fallback to same-window navigation');
+              window.location.href = authUrl;
+            }
+          };
+
           try {
-            if (window.__TAURI__?.invoke) {
-              console.info('[MSCD] Opening via opener plugin', authUrl);
-              window.__TAURI__.invoke('plugin:opener|open', { path: authUrl, new: true });
+            const tauri = (window).__TAURI__;
+            const invoke = tauri?.invoke ?? tauri?.core?.invoke;
+            if (invoke) {
+              console.info('[MSCD] Opening via open_external command', authUrl);
+              Promise.resolve(invoke('open_external', { url: authUrl }))
+                .then(() => console.info('[MSCD] open_external success'))
+                .catch((err) => {
+                  console.warn('[MSCD] open_external failed; falling back', err);
+                  fallbackOpen();
+                });
               return;
             } else {
               console.warn('[MSCD] __TAURI__.invoke unavailable; falling back to window.open');
@@ -255,11 +330,12 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
           } catch (e) {
             console.warn('TAURI shell unavailable, falling back to window.open', e);
           }
-          window.open(authUrl, '_blank', 'noreferrer');
+
+          fallbackOpen();
         });
 
-        const slider = thresholdRow.querySelector('.slider');
-        const label = thresholdRow.querySelector('#mscd-threshold-label');
+        const slider = thresholdRow.slider;
+        const label = thresholdRow.val;
         slider?.addEventListener('input', () => {
           label.textContent = `${slider.value}%`;
         });
@@ -284,6 +360,7 @@ pub fn run() {
   let script = build_overlay_script(lastfm_key, lastfm_callback);
 
   tauri::Builder::default()
+    .invoke_handler(tauri::generate_handler![open_external])
     .setup(|app| {
       if cfg!(debug_assertions) {
         let _ = app.handle().plugin(
@@ -300,4 +377,10 @@ pub fn run() {
     })
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
+}
+use tauri_plugin_opener::OpenerExt;
+
+#[tauri::command]
+async fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
+  app.opener().open_url(url, None::<String>).map_err(|e| e.to_string())
 }
