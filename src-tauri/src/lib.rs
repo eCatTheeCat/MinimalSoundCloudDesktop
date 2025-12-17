@@ -1,3 +1,12 @@
+use std::sync::Arc;
+
+use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_store::{Store, StoreExt};
+use url::Url;
+
+const STORE_PATH: &str = "lastfm.json";
+
 fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
   let auth_url = format!(
     "https://www.last.fm/api/auth/?api_key={}&cb={}",
@@ -8,6 +17,16 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
     (() => {
       if (window.__minimal_sc_overlay_installed) return;
       window.__minimal_sc_overlay_installed = true;
+
+      const getInvoker = () => {
+        try {
+          const t = window.__TAURI__;
+          return t?.invoke ?? t?.core?.invoke ?? null;
+        } catch (e) {
+          console.warn('[MSCD] __TAURI__ unavailable', e);
+          return null;
+        }
+      };
 
       function inject() {
         const host = document.createElement('div');
@@ -35,7 +54,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
             justify-content: space-between;
             gap: 10px;
             padding: 8px 12px;
-            min-height: 44px;
+            min-height: 36px;
             background: rgba(12, 14, 20, 0.96);
             border: 1px solid rgba(255,255,255,0.12);
             border-radius: 10px;
@@ -49,7 +68,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
           .muted { color: #a7acb8; font-size: 12px; white-space: nowrap; }
           .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
           button {
-            height: 32px;
+            height: 30px;
             padding: 0 12px;
             border-radius: 9px;
             border: 1px solid rgba(255,255,255,0.16);
@@ -206,19 +225,28 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
           const row = document.createElement('div');
           row.className = 'row';
 
-          const statusWrap = document.createElement('span');
-          statusWrap.innerHTML = 'Status: <strong>Not connected</strong>';
+          const statusWrap = document.createElement('div');
+          statusWrap.className = 'toggle';
+          const statusLabel = document.createElement('span');
+          statusLabel.textContent = 'Status: ';
+          const statusValue = document.createElement('strong');
+          statusValue.textContent = 'Not connected';
+          statusWrap.append(statusLabel, statusValue);
 
           const toggleWrap = document.createElement('div');
           toggleWrap.className = 'toggle';
           toggleWrap.style.gap = '12px';
 
-          const btn = document.createElement('button');
-          btn.id = 'mscd-lastfm-connect';
-          btn.textContent = 'Connect in browser';
-          if (keyMissing) btn.disabled = true;
+          const connectBtn = document.createElement('button');
+          connectBtn.id = 'mscd-lastfm-connect';
+          connectBtn.textContent = 'Connect in browser';
+          if (keyMissing) connectBtn.disabled = true;
 
-          toggleWrap.append(btn);
+          const disconnectBtn = document.createElement('button');
+          disconnectBtn.textContent = 'Disconnect';
+          disconnectBtn.style.display = 'none';
+
+          toggleWrap.append(connectBtn, disconnectBtn);
           row.append(statusWrap, toggleWrap);
 
           let warnNode = null;
@@ -232,7 +260,23 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
           authInfo.className = 'muted';
           authInfo.textContent = `Auth URL: ${authUrl}`;
 
-          return { row, btn, warnNode, authInfo };
+          const setStatus = (session) => {
+            if (session && session.username) {
+              statusValue.textContent = `Connected as ${session.username}`;
+              connectBtn.disabled = true;
+              disconnectBtn.disabled = false;
+              disconnectBtn.style.display = '';
+            } else {
+              statusValue.textContent = 'Not connected';
+              connectBtn.disabled = !!keyMissing;
+              disconnectBtn.disabled = true;
+              disconnectBtn.style.display = 'none';
+            }
+          };
+
+          setStatus(null);
+
+          return { row, connectBtn, disconnectBtn, warnNode, authInfo, setStatus };
         };
 
         const secPlayback = document.createElement('div');
@@ -248,7 +292,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
         const s2Title = document.createElement('h3');
         s2Title.textContent = 'Scrobbling';
         const thresholdRow = makeSliderRow();
-        const nowPlayingRow = makeToggleRow('Send "Now Playing"');
+        const nowPlayingRow = makeToggleRow('Send \"Now Playing\"');
         const notifyRow = makeToggleRow('Show scrobble notifications');
         secScrobble.append(s2Title, thresholdRow.row, nowPlayingRow.row, notifyRow.row);
 
@@ -285,43 +329,66 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
         };
         btnTray.onclick = () => alert('Minimize to tray (placeholder)');
 
-        const connectBtn = lf.btn;
-        console.info('[MSCD] Connect button present:', !!connectBtn, 'key missing:', keyMissing);
-        connectBtn?.addEventListener('click', () => {
-          console.info('[MSCD] Connect clicked');
+        const fallbackOpen = (url) => {
+          const opened = window.open(url, '_blank', 'noopener,noreferrer');
+          if (!opened) {
+            console.warn('[MSCD] window.open blocked, trying anchor click');
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.target = '_blank';
+            anchor.rel = 'noopener noreferrer';
+            shadow.appendChild(anchor);
+            anchor.click();
+            shadow.removeChild(anchor);
+          }
+          if (!opened) {
+            console.warn('[MSCD] Fallback to same-window navigation');
+            window.location.href = url;
+          }
+        };
+
+        const refreshLastfmStatus = async () => {
+          const invoke = getInvoker();
+          if (!invoke) return null;
+          try {
+            const session = await invoke('get_lastfm_status');
+            lf.setStatus(session || null);
+            return session || null;
+          } catch (err) {
+            console.warn('[MSCD] get_lastfm_status failed', err);
+            return null;
+          }
+        };
+
+        const pollForSession = (attempt = 0) => {
+          if (attempt > 30) return;
+          setTimeout(async () => {
+            const session = await refreshLastfmStatus();
+            if (!session) {
+              pollForSession(attempt + 1);
+            }
+          }, 2000);
+        };
+
+        lf.connectBtn?.addEventListener('click', () => {
           if (keyMissing) {
             console.warn('[MSCD] Key missing; connect disabled');
             return;
           }
 
-          const fallbackOpen = () => {
-            const opened = window.open(authUrl, '_blank', 'noopener,noreferrer');
-            if (!opened) {
-              console.warn('[MSCD] window.open blocked, trying anchor click');
-              const anchor = document.createElement('a');
-              anchor.href = authUrl;
-              anchor.target = '_blank';
-              anchor.rel = 'noopener noreferrer';
-              shadow.appendChild(anchor);
-              anchor.click();
-              shadow.removeChild(anchor);
-            }
-            if (!opened) {
-              console.warn('[MSCD] Fallback to same-window navigation');
-              window.location.href = authUrl;
-            }
-          };
-
           try {
-            const tauri = (window).__TAURI__;
-            const invoke = tauri?.invoke ?? tauri?.core?.invoke;
+            const invoke = getInvoker();
             if (invoke) {
               console.info('[MSCD] Opening via open_external command', authUrl);
               Promise.resolve(invoke('open_external', { url: authUrl }))
-                .then(() => console.info('[MSCD] open_external success'))
+                .then(() => {
+                  console.info('[MSCD] open_external success');
+                  pollForSession();
+                })
                 .catch((err) => {
                   console.warn('[MSCD] open_external failed; falling back', err);
-                  fallbackOpen();
+                  fallbackOpen(authUrl);
+                  pollForSession();
                 });
               return;
             } else {
@@ -331,7 +398,19 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
             console.warn('TAURI shell unavailable, falling back to window.open', e);
           }
 
-          fallbackOpen();
+          fallbackOpen(authUrl);
+          pollForSession();
+        });
+
+        lf.disconnectBtn?.addEventListener('click', async () => {
+          const invoke = getInvoker();
+          if (!invoke) return;
+          try {
+            await invoke('disconnect_lastfm');
+            lf.setStatus(null);
+          } catch (err) {
+            console.warn('[MSCD] disconnect_lastfm failed', err);
+          }
         });
 
         const slider = thresholdRow.slider;
@@ -341,9 +420,11 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
         });
 
         shadow.append(shell, backdrop);
+
+        refreshLastfmStatus();
       }
 
-      const ready = () => document.body ? inject() : setTimeout(ready, 50);
+      const ready = () => (document.body ? inject() : setTimeout(ready, 50));
       ready();
     })();
     "#;
@@ -353,59 +434,16 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
     .replace("{key}", lastfm_key)
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-  let lastfm_key = option_env!("LASTFM_API_KEY").unwrap_or("fca939e737410506a2c49ec7ee49ba68");
-  let lastfm_callback = option_env!("LASTFM_CALLBACK").unwrap_or("mscd://lastfm-callback");
-  let script = build_overlay_script(lastfm_key, lastfm_callback);
-
-  tauri::Builder::default()
-    .invoke_handler(tauri::generate_handler![
-      open_external,
-      complete_lastfm,
-      get_lastfm_status,
-      disconnect_lastfm
-    ])
-    .setup(|app| {
-      if cfg!(debug_assertions) {
-        let _ = app.handle().plugin(
-          tauri_plugin_log::Builder::default()
-            .level(log::LevelFilter::Info)
-            .build(),
-        )?;
-      }
-      let _ = app.handle().plugin(tauri_plugin_opener::init());
-      let _ = app
-        .handle()
-        .plugin(StoreBuilder::default().stores(["lastfm.json"]).build());
-      #[cfg(not(target_os = "macos"))]
-      {
-        let handle = app.app_handle().clone();
-        let _ = app.handle().plugin(tauri_plugin_deep_link::init(move |url| {
-          let url_string = url.to_string();
-          let app = handle.clone();
-          tauri::async_runtime::spawn(async move {
-            let state = tauri::State::<StoreCollection>::from_app(&app).unwrap();
-            if let Err(err) = complete_lastfm(state, url_string).await {
-              log::warn!("Failed to handle Last.fm callback: {}", err);
-            }
-          });
-        }));
-      }
-      Ok(())
-    })
-    .on_page_load(move |window, _| {
-      let _ = window.eval(&script);
-    })
-    .run(tauri::generate_context!())
-    .expect("error while running tauri application");
+fn get_store(app: &tauri::AppHandle) -> Result<Arc<Store<tauri::Wry>>, String> {
+  app.store(STORE_PATH).map_err(|e| e.to_string())
 }
-use tauri_plugin_opener::OpenerExt;
-use tauri_plugin_store::{StoreBuilder, StoreCollection};
 
 #[tauri::command]
 async fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
-  app.opener().open_url(url, None::<String>).map_err(|e| e.to_string())
+  app
+    .opener()
+    .open_url(url, None::<String>)
+    .map_err(|e| e.to_string())
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
@@ -419,7 +457,7 @@ async fn fetch_lastfm_session(api_key: &str, api_secret: &str, token: &str) -> R
     "api_key{}methodauth.getSessiontoken{}{}",
     api_key, token, api_secret
   );
-  let sig = format!("{:x}", md_5::Md5::digest(sig_base.as_bytes()));
+  let sig = format!("{:x}", md5::compute(sig_base.as_bytes()));
 
   #[derive(serde::Deserialize)]
   struct SessionResp {
@@ -458,10 +496,9 @@ async fn fetch_lastfm_session(api_key: &str, api_secret: &str, token: &str) -> R
 }
 
 #[tauri::command]
-async fn get_lastfm_status(store: tauri::State<'_, StoreCollection>) -> Result<Option<LastfmSession>, String> {
-  let handle = store.get("lastfm.json").ok_or("store not found")?;
-  let data = handle.get("session");
-  if let Some(val) = data {
+async fn get_lastfm_status(app: tauri::AppHandle) -> Result<Option<LastfmSession>, String> {
+  let store = get_store(&app)?;
+  if let Some(val) = store.get("session") {
     serde_json::from_value(val).map_err(|e| e.to_string())
   } else {
     Ok(None)
@@ -469,17 +506,15 @@ async fn get_lastfm_status(store: tauri::State<'_, StoreCollection>) -> Result<O
 }
 
 #[tauri::command]
-async fn disconnect_lastfm(store: tauri::State<'_, StoreCollection>) -> Result<(), String> {
-  if let Some(handle) = store.get("lastfm.json") {
-    handle.delete("session")?;
-    handle.save().map_err(|e| e.to_string())?;
-  }
-  Ok(())
+async fn disconnect_lastfm(app: tauri::AppHandle) -> Result<(), String> {
+  let store = get_store(&app)?;
+  store.delete("session");
+  store.save().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn complete_lastfm(store: tauri::State<'_, StoreCollection>, url: String) -> Result<LastfmSession, String> {
-  let parsed = url::Url::parse(&url).map_err(|e| e.to_string())?;
+async fn complete_lastfm(app: tauri::AppHandle, url: String) -> Result<LastfmSession, String> {
+  let parsed = Url::parse(&url).map_err(|e| e.to_string())?;
   let token = parsed
     .query_pairs()
     .find(|(k, _)| k == "token")
@@ -494,10 +529,79 @@ async fn complete_lastfm(store: tauri::State<'_, StoreCollection>, url: String) 
 
   let session = fetch_lastfm_session(api_key, api_secret, &token).await?;
 
-  if let Some(handle) = store.get("lastfm.json") {
-    handle.set("session", serde_json::to_value(&session).map_err(|e| e.to_string())?)?;
-    handle.save().map_err(|e| e.to_string())?;
-  }
+  let store = get_store(&app)?;
+  store.set(
+    "session",
+    serde_json::to_value(&session).map_err(|e| e.to_string())?,
+  );
+  store.save().map_err(|e| e.to_string())?;
 
   Ok(session)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+  let lastfm_key = option_env!("LASTFM_API_KEY").unwrap_or("fca939e737410506a2c49ec7ee49ba68");
+  let lastfm_callback = option_env!("LASTFM_CALLBACK").unwrap_or("mscd://lastfm-callback");
+  let script = build_overlay_script(lastfm_key, lastfm_callback);
+
+  let mut builder = tauri::Builder::default();
+
+  if cfg!(debug_assertions) {
+    builder = builder.plugin(
+      tauri_plugin_log::Builder::default()
+        .level(log::LevelFilter::Info)
+        .build(),
+    );
+  }
+
+  builder = builder
+    .plugin(tauri_plugin_opener::init())
+    .plugin(tauri_plugin_store::Builder::default().build())
+    .plugin(tauri_plugin_deep_link::init())
+    .invoke_handler(tauri::generate_handler![
+      open_external,
+      complete_lastfm,
+      get_lastfm_status,
+      disconnect_lastfm
+    ])
+    .setup(|app| {
+      #[cfg(desktop)]
+      {
+        let handle = app.handle().clone();
+        let deep = handle.deep_link();
+        let _ = deep.register_all();
+
+        if let Ok(Some(urls)) = deep.get_current() {
+          for url in urls {
+            let app_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+              if let Err(err) = complete_lastfm(app_handle, url.to_string()).await {
+                log::warn!("Failed to handle Last.fm callback: {}", err);
+              }
+            });
+          }
+        }
+
+        let handle_for_events = handle.clone();
+        deep.on_open_url(move |event| {
+          for url in event.urls() {
+            let app_handle = handle_for_events.clone();
+            tauri::async_runtime::spawn(async move {
+              if let Err(err) = complete_lastfm(app_handle, url.to_string()).await {
+                log::warn!("Failed to handle Last.fm callback: {}", err);
+              }
+            });
+          }
+        });
+      }
+      Ok(())
+    })
+    .on_page_load(move |window, _| {
+      let _ = window.eval(&script);
+    });
+
+  builder
+    .run(tauri::generate_context!())
+    .expect("error while running tauri application");
 }

@@ -27,6 +27,14 @@
       }
     ]
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "name": "Minimal SoundCloud Desktop",
+        "schemes": ["mscd"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
