@@ -6,6 +6,7 @@ use tauri_plugin_store::{Store, StoreExt};
 use url::Url;
 
 const STORE_PATH: &str = "lastfm.json";
+const DEV_CALLBACK_URL: &str = "http://127.0.0.1:35729/callback";
 
 fn lastfm_key() -> Option<String> {
   std::env::var("LASTFM_API_KEY")
@@ -20,10 +21,17 @@ fn lastfm_secret() -> Option<String> {
 }
 
 fn lastfm_callback() -> String {
-  std::env::var("LASTFM_CALLBACK")
-    .ok()
-    .or_else(|| option_env!("LASTFM_CALLBACK").map(|s| s.to_string()))
-    .unwrap_or_else(|| "mscd://lastfm-callback".to_string())
+  #[cfg(debug_assertions)]
+  {
+    DEV_CALLBACK_URL.to_string()
+  }
+  #[cfg(not(debug_assertions))]
+  {
+    std::env::var("LASTFM_CALLBACK")
+      .ok()
+      .or_else(|| option_env!("LASTFM_CALLBACK").map(|s| s.to_string()))
+      .unwrap_or_else(|| "mscd://lastfm-callback".to_string())
+  }
 }
 
 fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
@@ -567,6 +575,77 @@ async fn complete_lastfm(app: tauri::AppHandle, url: String) -> Result<LastfmSes
   Ok(session)
 }
 
+#[cfg(debug_assertions)]
+fn start_dev_callback_server(app: tauri::AppHandle) {
+  let app_handle = app.clone();
+  tauri::async_runtime::spawn(async move {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:35729").await {
+      Ok(l) => {
+        log::info!("[Last.fm] Dev callback server listening on {}", DEV_CALLBACK_URL);
+        l
+      }
+      Err(err) => {
+        log::warn!("[Last.fm] Failed to bind dev callback server: {}", err);
+        return;
+      }
+    };
+
+    loop {
+      let (mut socket, _) = match listener.accept().await {
+        Ok(s) => s,
+        Err(err) => {
+          log::warn!("[Last.fm] Accept failed: {}", err);
+          continue;
+        }
+      };
+      let app = app_handle.clone();
+      tauri::async_runtime::spawn(async move {
+        let mut buf = vec![0u8; 2048];
+        let n = match socket.read(&mut buf).await {
+          Ok(n) => n,
+          Err(err) => {
+            log::warn!("[Last.fm] Read failed: {}", err);
+            return;
+          }
+        };
+        let req = String::from_utf8_lossy(&buf[..n]);
+        let mut token: Option<String> = None;
+        if let Some(line) = req.lines().next() {
+          if let Some(path) = line.split_whitespace().nth(1) {
+            if let Some(q_idx) = path.find('?') {
+              let query = &path[q_idx + 1..];
+              for pair in query.split('&') {
+                if let Some((k, v)) = pair.split_once('=') {
+                  if k == "token" {
+                    token = Some(v.to_string());
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        let response = if let Some(tok) = token {
+          let url = format!("{}?token={}", DEV_CALLBACK_URL, tok);
+          log::info!("[Last.fm] Dev callback received token {}", tok);
+          if let Err(err) = complete_lastfm(app.clone(), url).await {
+            log::warn!("[Last.fm] Dev callback processing failed: {}", err);
+          }
+          "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nYou can close this tab.\r\n"
+        } else {
+          log::warn!("[Last.fm] Dev callback missing token");
+          "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\n\r\nMissing token.\r\n"
+        };
+
+        let _ = socket.write_all(response.as_bytes()).await;
+        let _ = socket.shutdown().await;
+      });
+    }
+  });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   let key_for_overlay = lastfm_key().unwrap_or_else(|| "fca939e737410506a2c49ec7ee49ba68".to_string());
@@ -588,14 +667,22 @@ pub fn run() {
     .plugin(tauri_plugin_store::Builder::default().build())
     .plugin(tauri_plugin_deep_link::init())
     .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+      log::info!("[Last.fm] Single-instance callback with argv: {:?}", argv);
       // On Windows, protocol handlers spawn a new instance; forward to the existing one.
-      if let Some(url) = argv.iter().find(|a| a.starts_with("mscd://")).cloned() {
+      if let Some(url) = argv
+        .iter()
+        .find(|a| a.contains("mscd://"))
+        .cloned()
+      {
+        log::info!("[Last.fm] Forwarding URL from secondary instance: {}", url);
         let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
           if let Err(err) = complete_lastfm(app_handle, url.clone()).await {
             log::warn!("[Last.fm] Failed to handle single-instance callback {}: {}", url, err);
           }
         });
+      } else {
+        log::info!("[Last.fm] No mscd:// URL found in single-instance argv");
       }
     }))
     .invoke_handler(tauri::generate_handler![
@@ -605,6 +692,10 @@ pub fn run() {
       disconnect_lastfm
     ])
     .setup(|app| {
+      #[cfg(debug_assertions)]
+      {
+        start_dev_callback_server(app.handle());
+      }
       #[cfg(desktop)]
       {
         let handle = app.handle().clone();
@@ -612,6 +703,7 @@ pub fn run() {
         let _ = deep.register_all();
 
         if let Ok(Some(urls)) = deep.get_current() {
+          log::info!("[Last.fm] deep_link get_current: {:?}", urls);
           for url in urls {
             let app_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -624,7 +716,9 @@ pub fn run() {
 
         let handle_for_events = handle.clone();
         deep.on_open_url(move |event| {
-          for url in event.urls() {
+          let urls = event.urls();
+          log::info!("[Last.fm] deep_link on_open_url: {:?}", urls);
+          for url in urls {
             let app_handle = handle_for_events.clone();
             tauri::async_runtime::spawn(async move {
               if let Err(err) = complete_lastfm(app_handle, url.to_string()).await {
