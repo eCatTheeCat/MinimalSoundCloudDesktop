@@ -360,7 +360,12 @@ pub fn run() {
   let script = build_overlay_script(lastfm_key, lastfm_callback);
 
   tauri::Builder::default()
-    .invoke_handler(tauri::generate_handler![open_external])
+    .invoke_handler(tauri::generate_handler![
+      open_external,
+      complete_lastfm,
+      get_lastfm_status,
+      disconnect_lastfm
+    ])
     .setup(|app| {
       if cfg!(debug_assertions) {
         let _ = app.handle().plugin(
@@ -370,6 +375,23 @@ pub fn run() {
         )?;
       }
       let _ = app.handle().plugin(tauri_plugin_opener::init());
+      let _ = app
+        .handle()
+        .plugin(StoreBuilder::default().stores(["lastfm.json"]).build());
+      #[cfg(not(target_os = "macos"))]
+      {
+        let handle = app.app_handle().clone();
+        let _ = app.handle().plugin(tauri_plugin_deep_link::init(move |url| {
+          let url_string = url.to_string();
+          let app = handle.clone();
+          tauri::async_runtime::spawn(async move {
+            let state = tauri::State::<StoreCollection>::from_app(&app).unwrap();
+            if let Err(err) = complete_lastfm(state, url_string).await {
+              log::warn!("Failed to handle Last.fm callback: {}", err);
+            }
+          });
+        }));
+      }
       Ok(())
     })
     .on_page_load(move |window, _| {
@@ -379,8 +401,103 @@ pub fn run() {
     .expect("error while running tauri application");
 }
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_store::{StoreBuilder, StoreCollection};
 
 #[tauri::command]
 async fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
   app.opener().open_url(url, None::<String>).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+struct LastfmSession {
+  session_key: String,
+  username: String,
+}
+
+async fn fetch_lastfm_session(api_key: &str, api_secret: &str, token: &str) -> Result<LastfmSession, String> {
+  let sig_base = format!(
+    "api_key{}methodauth.getSessiontoken{}{}",
+    api_key, token, api_secret
+  );
+  let sig = format!("{:x}", md_5::Md5::digest(sig_base.as_bytes()));
+
+  #[derive(serde::Deserialize)]
+  struct SessionResp {
+    session: SessionInner,
+  }
+  #[derive(serde::Deserialize)]
+  struct SessionInner {
+    name: String,
+    key: String,
+  }
+
+  let client = reqwest::Client::new();
+  let url = "https://ws.audioscrobbler.com/2.0/";
+  let res = client
+    .get(url)
+    .query(&[
+      ("method", "auth.getSession"),
+      ("api_key", api_key),
+      ("token", token),
+      ("api_sig", &sig),
+      ("format", "json"),
+    ])
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+
+  if !res.status().is_success() {
+    return Err(format!("Last.fm session request failed: {}", res.status()));
+  }
+
+  let body: SessionResp = res.json().await.map_err(|e| e.to_string())?;
+  Ok(LastfmSession {
+    session_key: body.session.key,
+    username: body.session.name,
+  })
+}
+
+#[tauri::command]
+async fn get_lastfm_status(store: tauri::State<'_, StoreCollection>) -> Result<Option<LastfmSession>, String> {
+  let handle = store.get("lastfm.json").ok_or("store not found")?;
+  let data = handle.get("session");
+  if let Some(val) = data {
+    serde_json::from_value(val).map_err(|e| e.to_string())
+  } else {
+    Ok(None)
+  }
+}
+
+#[tauri::command]
+async fn disconnect_lastfm(store: tauri::State<'_, StoreCollection>) -> Result<(), String> {
+  if let Some(handle) = store.get("lastfm.json") {
+    handle.delete("session")?;
+    handle.save().map_err(|e| e.to_string())?;
+  }
+  Ok(())
+}
+
+#[tauri::command]
+async fn complete_lastfm(store: tauri::State<'_, StoreCollection>, url: String) -> Result<LastfmSession, String> {
+  let parsed = url::Url::parse(&url).map_err(|e| e.to_string())?;
+  let token = parsed
+    .query_pairs()
+    .find(|(k, _)| k == "token")
+    .map(|(_, v)| v.to_string())
+    .ok_or("missing token")?;
+
+  let api_key = option_env!("LASTFM_API_KEY").unwrap_or("fca939e737410506a2c49ec7ee49ba68");
+  let api_secret = option_env!("LASTFM_API_SECRET").unwrap_or("17d39429c9bcacaba6feadf8242ebec5");
+  if api_key == "fca939e737410506a2c49ec7ee49ba68" || api_secret == "17d39429c9bcacaba6feadf8242ebec5" {
+    return Err("LASTFM_API_KEY or LASTFM_API_SECRET not set".into());
+  }
+
+  let session = fetch_lastfm_session(api_key, api_secret, &token).await?;
+
+  if let Some(handle) = store.get("lastfm.json") {
+    handle.set("session", serde_json::to_value(&session).map_err(|e| e.to_string())?)?;
+    handle.save().map_err(|e| e.to_string())?;
+  }
+
+  Ok(session)
 }
