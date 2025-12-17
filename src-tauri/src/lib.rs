@@ -7,6 +7,25 @@ use url::Url;
 
 const STORE_PATH: &str = "lastfm.json";
 
+fn lastfm_key() -> Option<String> {
+  std::env::var("LASTFM_API_KEY")
+    .ok()
+    .or_else(|| option_env!("LASTFM_API_KEY").map(|s| s.to_string()))
+}
+
+fn lastfm_secret() -> Option<String> {
+  std::env::var("LASTFM_API_SECRET")
+    .ok()
+    .or_else(|| option_env!("LASTFM_API_SECRET").map(|s| s.to_string()))
+}
+
+fn lastfm_callback() -> String {
+  std::env::var("LASTFM_CALLBACK")
+    .ok()
+    .or_else(|| option_env!("LASTFM_CALLBACK").map(|s| s.to_string()))
+    .unwrap_or_else(|| "mscd://lastfm-callback".to_string())
+}
+
 fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str) -> String {
   let auth_url = format!(
     "https://www.last.fm/api/auth/?api_key={}&cb={}",
@@ -458,6 +477,7 @@ async fn fetch_lastfm_session(api_key: &str, api_secret: &str, token: &str) -> R
     api_key, token, api_secret
   );
   let sig = format!("{:x}", md5::compute(sig_base.as_bytes()));
+  log::info!("[Last.fm] Requesting session for token {}", token);
 
   #[derive(serde::Deserialize)]
   struct SessionResp {
@@ -499,8 +519,11 @@ async fn fetch_lastfm_session(api_key: &str, api_secret: &str, token: &str) -> R
 async fn get_lastfm_status(app: tauri::AppHandle) -> Result<Option<LastfmSession>, String> {
   let store = get_store(&app)?;
   if let Some(val) = store.get("session") {
-    serde_json::from_value(val).map_err(|e| e.to_string())
+    let parsed: LastfmSession = serde_json::from_value(val).map_err(|e| e.to_string())?;
+    log::info!("[Last.fm] Returning stored session for user {}", parsed.username);
+    Ok(Some(parsed))
   } else {
+    log::info!("[Last.fm] No session stored");
     Ok(None)
   }
 }
@@ -521,13 +544,17 @@ async fn complete_lastfm(app: tauri::AppHandle, url: String) -> Result<LastfmSes
     .map(|(_, v)| v.to_string())
     .ok_or("missing token")?;
 
-  let api_key = option_env!("LASTFM_API_KEY").unwrap_or("fca939e737410506a2c49ec7ee49ba68");
-  let api_secret = option_env!("LASTFM_API_SECRET").unwrap_or("17d39429c9bcacaba6feadf8242ebec5");
-  if api_key == "fca939e737410506a2c49ec7ee49ba68" || api_secret == "17d39429c9bcacaba6feadf8242ebec5" {
-    return Err("LASTFM_API_KEY or LASTFM_API_SECRET not set".into());
-  }
+  log::info!("[Last.fm] Received callback with token {}", token);
 
-  let session = fetch_lastfm_session(api_key, api_secret, &token).await?;
+  let api_key = lastfm_key().ok_or("LASTFM_API_KEY not set")?;
+  let api_secret = lastfm_secret().ok_or("LASTFM_API_SECRET not set")?;
+
+  let session = fetch_lastfm_session(&api_key, &api_secret, &token).await?;
+  log::info!(
+    "[Last.fm] Session established for user {}, key starts with {}***",
+    session.username,
+    session.session_key.chars().take(4).collect::<String>()
+  );
 
   let store = get_store(&app)?;
   store.set(
@@ -535,15 +562,16 @@ async fn complete_lastfm(app: tauri::AppHandle, url: String) -> Result<LastfmSes
     serde_json::to_value(&session).map_err(|e| e.to_string())?,
   );
   store.save().map_err(|e| e.to_string())?;
+  log::info!("[Last.fm] Session persisted to store");
 
   Ok(session)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-  let lastfm_key = option_env!("LASTFM_API_KEY").unwrap_or("fca939e737410506a2c49ec7ee49ba68");
-  let lastfm_callback = option_env!("LASTFM_CALLBACK").unwrap_or("mscd://lastfm-callback");
-  let script = build_overlay_script(lastfm_key, lastfm_callback);
+  let key_for_overlay = lastfm_key().unwrap_or_else(|| "fca939e737410506a2c49ec7ee49ba68".to_string());
+  let lastfm_cb = lastfm_callback();
+  let script = build_overlay_script(&key_for_overlay, &lastfm_cb);
 
   let mut builder = tauri::Builder::default();
 
