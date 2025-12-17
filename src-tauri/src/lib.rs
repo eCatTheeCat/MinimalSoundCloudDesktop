@@ -587,6 +587,17 @@ pub fn run() {
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_store::Builder::default().build())
     .plugin(tauri_plugin_deep_link::init())
+    .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+      // On Windows, protocol handlers spawn a new instance; forward to the existing one.
+      if let Some(url) = argv.iter().find(|a| a.starts_with("mscd://")).cloned() {
+        let app_handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+          if let Err(err) = complete_lastfm(app_handle, url.clone()).await {
+            log::warn!("[Last.fm] Failed to handle single-instance callback {}: {}", url, err);
+          }
+        });
+      }
+    }))
     .invoke_handler(tauri::generate_handler![
       open_external,
       complete_lastfm,
