@@ -5,8 +5,15 @@
   "windows": [
     "main"
   ],
+  "remote": {
+    "urls": [
+      "https://soundcloud.com/*",
+      "https://*.soundcloud.com/*"
+    ]
+  },
   "permissions": [
-    "core:default",    
+    "core:default", 
+    "core:app:default",   
     {
       "identifier": "opener:allow-open-url",
       "allow": [
