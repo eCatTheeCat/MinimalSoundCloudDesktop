@@ -23,3 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 /.tauri-plugins
+
+# Local secrets (do not commit)
+lastfm.local.json
+src-tauri/lastfm.local.json

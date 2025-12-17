@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use serde::Deserialize;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_store::{Store, StoreExt};
@@ -8,29 +9,75 @@ use url::Url;
 const STORE_PATH: &str = "lastfm.json";
 const DEV_CALLBACK_URL: &str = "http://127.0.0.1:35729/callback";
 
+#[derive(Debug, Deserialize)]
+struct LocalLastfmConfig {
+  api_key: String,
+  api_secret: String,
+  #[serde(default)]
+  callback: Option<String>,
+}
+
+fn load_lastfm_config() -> Option<LocalLastfmConfig> {
+  let mut candidates = Vec::new();
+
+  if let Ok(p) = std::env::var("LASTFM_CONFIG") {
+    candidates.push(std::path::PathBuf::from(p));
+  }
+
+  if cfg!(debug_assertions) {
+    candidates.push(std::path::PathBuf::from("src-tauri/lastfm.local.json"));
+  }
+
+  candidates.push(std::path::PathBuf::from("lastfm.local.json"));
+
+  if let Ok(mut exe) = std::env::current_exe() {
+    exe.pop();
+    candidates.push(exe.join("lastfm.local.json"));
+  }
+
+  for path in candidates {
+    if path.exists() {
+      if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(cfg) = serde_json::from_str::<LocalLastfmConfig>(&text) {
+          return Some(cfg);
+        }
+      }
+    }
+  }
+
+  None
+}
+
 fn lastfm_key() -> Option<String> {
-  std::env::var("LASTFM_API_KEY")
-    .ok()
-    .or_else(|| option_env!("LASTFM_API_KEY").map(|s| s.to_string()))
+  std::env::var("LASTFM_API_KEY").ok().or_else(|| {
+    load_lastfm_config()
+      .map(|c| c.api_key)
+      .or_else(|| option_env!("LASTFM_API_KEY").map(|s| s.to_string()))
+  })
 }
 
 fn lastfm_secret() -> Option<String> {
-  std::env::var("LASTFM_API_SECRET")
-    .ok()
-    .or_else(|| option_env!("LASTFM_API_SECRET").map(|s| s.to_string()))
+  std::env::var("LASTFM_API_SECRET").ok().or_else(|| {
+    load_lastfm_config()
+      .map(|c| c.api_secret)
+      .or_else(|| option_env!("LASTFM_API_SECRET").map(|s| s.to_string()))
+  })
 }
 
 fn lastfm_callback() -> String {
   #[cfg(debug_assertions)]
   {
-    DEV_CALLBACK_URL.to_string()
+    load_lastfm_config()
+      .and_then(|c| c.callback)
+      .unwrap_or_else(|| DEV_CALLBACK_URL.to_string())
   }
   #[cfg(not(debug_assertions))]
   {
-    std::env::var("LASTFM_CALLBACK")
-      .ok()
-      .or_else(|| option_env!("LASTFM_CALLBACK").map(|s| s.to_string()))
-      .unwrap_or_else(|| "mscd://lastfm-callback".to_string())
+    std::env::var("LASTFM_CALLBACK").ok().or_else(|| {
+      load_lastfm_config()
+        .and_then(|c| c.callback)
+        .or_else(|| option_env!("LASTFM_CALLBACK").map(|s| s.to_string()))
+    }).unwrap_or_else(|| "mscd://lastfm-callback".to_string())
   }
 }
 
@@ -648,7 +695,7 @@ fn start_dev_callback_server(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-  let key_for_overlay = lastfm_key().unwrap_or_else(|| "fca939e737410506a2c49ec7ee49ba68".to_string());
+  let key_for_overlay = lastfm_key().unwrap_or_else(|| "REPLACE_ME".to_string());
   let lastfm_cb = lastfm_callback();
   let script = build_overlay_script(&key_for_overlay, &lastfm_cb);
 
@@ -694,7 +741,7 @@ pub fn run() {
     .setup(|app| {
       #[cfg(debug_assertions)]
       {
-        start_dev_callback_server(app.handle());
+        start_dev_callback_server(app.handle().clone());
       }
       #[cfg(desktop)]
       {
