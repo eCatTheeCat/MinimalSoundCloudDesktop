@@ -504,12 +504,17 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         // --- Scrobble observer (MediaSession primary, DOM fallback) ---
         const startScrobbleObserver = () => {
           const endpoint = '{playback_url}';
+          console.info('[MSCD] Scrobble observer starting, endpoint:', endpoint);
           let lastPayload = null;
           let logCount = 0;
           let lastLoggedTrack = null;
 
           const grabMeta = () => {
             const audio = document.querySelector('audio');
+            if (!audio && logCount < 5) {
+              console.info('[MSCD] No audio element found yet');
+              logCount += 1;
+            }
             const posMs = audio ? Math.floor((audio.currentTime || 0) * 1000) : 0;
             const paused = audio ? !!audio.paused : false;
 
@@ -547,7 +552,17 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
 
           const pushUpdate = () => {
             const payload = grabMeta();
-            if (!payload.title || !payload.artist || !payload.durationMs) return;
+            if (!payload.title || !payload.artist || !payload.durationMs) {
+              if (logCount < 5) {
+                console.info('[MSCD] Missing metadata', {
+                  title: payload.title,
+                  artist: payload.artist,
+                  durationMs: payload.durationMs,
+                });
+                logCount += 1;
+              }
+              return;
+            }
 
             if (logCount < 5 || payload.trackId !== lastLoggedTrack) {
               console.info('[MSCD] playback payload', payload);
@@ -566,10 +581,18 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
             }
             lastPayload = payload;
 
+            const body = JSON.stringify(payload);
+            if (navigator.sendBeacon) {
+              const blob = new Blob([body], { type: 'text/plain' });
+              const sent = navigator.sendBeacon(endpoint, blob);
+              if (sent) return;
+            }
+
             fetch(endpoint, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload),
+              mode: 'no-cors',
+              headers: { 'Content-Type': 'text/plain' },
+              body,
             }).catch((err) => {
               console.warn('[MSCD] playback post failed', err);
             });
@@ -1060,9 +1083,15 @@ fn start_playback_server(
   let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
   let port = listener.local_addr().ok()?.port();
   let local_url = format!("http://127.0.0.1:{}/playback", port);
-  let listener = tokio::net::TcpListener::from_std(listener).ok()?;
 
   tauri::async_runtime::spawn(async move {
+    let listener = match tokio::net::TcpListener::from_std(listener) {
+      Ok(l) => l,
+      Err(err) => {
+        log::warn!("[Last.fm] Playback server start failed: {}", err);
+        return;
+      }
+    };
     loop {
       let (mut socket, _) = match listener.accept().await {
         Ok(s) => s,
@@ -1071,6 +1100,7 @@ fn start_playback_server(
           continue;
         }
       };
+      log::info!("[Last.fm] Playback server accepted connection");
       let app_clone = app_handle.clone();
       let state_clone = state_for_server.clone();
       tauri::async_runtime::spawn(async move {
@@ -1118,6 +1148,7 @@ fn start_playback_server(
                   total_read += n;
                 }
                 let body = &buf[body_start..std::cmp::min(total_read, body_start + len)];
+                log::info!("[Last.fm] Playback server received {} bytes", body.len());
                 match serde_json::from_slice::<PlaybackPayload>(body) {
                   Ok(payload) => {
                     if let Err(err) = handle_playback(app_clone.clone(), &state_clone, payload).await {
@@ -1128,6 +1159,8 @@ fn start_playback_server(
                     log::warn!("[Last.fm] Playback server JSON parse failed: {}", err);
                   }
                 }
+              } else {
+                log::warn!("[Last.fm] Playback server missing content-length");
               }
               break;
             }
