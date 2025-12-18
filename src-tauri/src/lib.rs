@@ -93,6 +93,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
 
   let template = r#"
     (() => {
+      console.info('[MSCD] Overlay script loaded');
       if (window.__minimal_sc_overlay_installed) return;
       window.__minimal_sc_overlay_installed = true;
 
@@ -107,6 +108,8 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
       };
 
       function inject() {
+        try {
+        console.info('[MSCD] Injecting overlay');
         const host = document.createElement('div');
         host.id = 'mscd-overlay-host';
         host.style.position = 'fixed';
@@ -369,10 +372,11 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         secScrobble.className = 'section';
         const s2Title = document.createElement('h3');
         s2Title.textContent = 'Scrobbling';
+        const scrobbleToggle = makeToggleRow('Enable scrobbling');
         const thresholdRow = makeSliderRow();
         const nowPlayingRow = makeToggleRow('Send \"Now Playing\"');
         const notifyRow = makeToggleRow('Show scrobble notifications');
-        secScrobble.append(s2Title, thresholdRow.row, nowPlayingRow.row, notifyRow.row);
+        secScrobble.append(s2Title, scrobbleToggle.row, thresholdRow.row, nowPlayingRow.row, notifyRow.row);
 
         const secLastfm = document.createElement('div');
         secLastfm.className = 'section';
@@ -505,6 +509,10 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         const startScrobbleObserver = () => {
           const endpoint = '{playback_url}';
           console.info('[MSCD] Scrobble observer starting, endpoint:', endpoint);
+          if (!endpoint) {
+            console.warn('[MSCD] playback endpoint missing, observer disabled');
+            return;
+          }
           let lastPayload = null;
           let logCount = 0;
           let lastLoggedTrack = null;
@@ -659,9 +667,91 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         };
 
         startScrobbleObserver();
+
+        const settingsUrl = endpoint.replace(/\/playback$/, '/settings');
+
+        const applySettings = (cfg) => {
+          if (!cfg) return;
+          if (typeof cfg.threshold === 'number') {
+            const percent = Math.max(1, Math.min(100, Math.round(cfg.threshold * 100)));
+            thresholdRow.slider.value = String(percent);
+            thresholdRow.val.textContent = `${percent}%`;
+          }
+          if (typeof cfg.enable_scrobble === 'boolean') {
+            scrobbleToggle.input.checked = cfg.enable_scrobble;
+          }
+          if (typeof cfg.enable_now_playing === 'boolean') {
+            nowPlayingRow.input.checked = cfg.enable_now_playing;
+          }
+          if (typeof cfg.enable_notifications === 'boolean') {
+            notifyRow.input.checked = cfg.enable_notifications;
+          }
+        };
+
+        const gatherSettings = () => ({
+          threshold: Math.max(0.01, Math.min(1, Number(thresholdRow.slider.value) / 100)),
+          enable_scrobble: scrobbleToggle.input.checked,
+          enable_now_playing: nowPlayingRow.input.checked,
+          enable_notifications: notifyRow.input.checked,
+        });
+
+        const loadSettings = async () => {
+          if (!settingsUrl) return;
+          try {
+            const res = await fetch(settingsUrl, { method: 'GET', mode: 'cors' });
+            if (!res.ok) {
+              console.warn('[MSCD] settings load failed', res.status);
+              return;
+            }
+            const cfg = await res.json();
+            applySettings(cfg);
+          } catch (err) {
+            console.warn('[MSCD] settings load error', err);
+          }
+        };
+
+        const saveSettings = async () => {
+          if (!settingsUrl) return;
+          const payload = gatherSettings();
+          try {
+            const res = await fetch(settingsUrl, {
+              method: 'POST',
+              mode: 'cors',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+              console.warn('[MSCD] settings save failed', res.status);
+              return;
+            }
+            const cfg = await res.json();
+            applySettings(cfg);
+          } catch (err) {
+            console.warn('[MSCD] settings save error', err);
+          }
+        };
+        slider?.addEventListener('change', () => {
+          saveSettings();
+        });
+
+        scrobbleToggle.input.addEventListener('change', saveSettings);
+        nowPlayingRow.input.addEventListener('change', saveSettings);
+        notifyRow.input.addEventListener('change', saveSettings);
+        loadSettings();
+        console.info('[MSCD] Overlay injected');
+        } catch (err) {
+          console.warn('[MSCD] Overlay inject failed', err);
+        }
       }
 
-      const ready = () => (document.body ? inject() : setTimeout(ready, 50));
+      const ready = () => {
+        if (document.body) {
+          inject();
+        } else {
+          console.info('[MSCD] Waiting for document.body');
+          setTimeout(ready, 50);
+        }
+      };
       ready();
     })();
     "#;
@@ -701,6 +791,15 @@ fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
   }
 }
 
+fn save_scrobble_config(app: &tauri::AppHandle, cfg: &ScrobbleConfig) -> Result<(), String> {
+  let store = get_store(app)?;
+  store.set(
+    "scrobble_config",
+    serde_json::to_value(cfg).map_err(|e| e.to_string())?,
+  );
+  store.save().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
   app
@@ -720,6 +819,15 @@ struct ScrobbleConfig {
   enable_scrobble: bool,
   enable_now_playing: bool,
   enable_notifications: bool,
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+#[serde(default)]
+struct ScrobbleConfigUpdate {
+  threshold: Option<f32>,
+  enable_scrobble: Option<bool>,
+  enable_now_playing: Option<bool>,
+  enable_notifications: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1162,6 +1270,8 @@ fn start_playback_server(
         let mut buf = vec![0u8; 8192];
         let mut total_read = 0usize;
         let mut content_length: Option<usize> = None;
+        let mut method = String::new();
+        let mut path = String::new();
         loop {
           let n = match socket.read(&mut buf[total_read..]).await {
             Ok(0) => break,
@@ -1175,6 +1285,12 @@ fn start_playback_server(
           if total_read >= 4 {
             if let Some(idx) = twoway::find_bytes(&buf[..total_read], b"\r\n\r\n") {
               let headers = &buf[..idx];
+              let header_str = String::from_utf8_lossy(headers);
+              if let Some(line) = header_str.lines().next() {
+                let mut parts = line.split_whitespace();
+                method = parts.next().unwrap_or("").to_string();
+                path = parts.next().unwrap_or("").to_string();
+              }
               for line in headers.split(|b| *b == b'\n') {
                 if let Some(pos) = line.iter().position(|b| *b == b':') {
                   let (name, val) = line.split_at(pos);
@@ -1188,6 +1304,22 @@ fn start_playback_server(
                 }
               }
               let body_start = idx + 4;
+              if method == "OPTIONS" {
+                let response = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n";
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+                return;
+              }
+
+              let want_body = method == "POST";
+              if want_body && content_length.is_none() {
+                log::warn!("[Last.fm] Playback server missing content-length");
+                let response = "HTTP/1.1 411 Length Required\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n";
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+                return;
+              }
+
               if let Some(len) = content_length {
                 let needed = body_start + len;
                 while total_read < needed {
@@ -1202,19 +1334,61 @@ fn start_playback_server(
                   total_read += n;
                 }
                 let body = &buf[body_start..std::cmp::min(total_read, body_start + len)];
-                log::info!("[Last.fm] Playback server received {} bytes", body.len());
-                match serde_json::from_slice::<PlaybackPayload>(body) {
-                  Ok(payload) => {
-                    if let Err(err) = handle_playback(app_clone.clone(), &state_clone, payload).await {
-                      log::warn!("[Last.fm] handle_playback from server failed: {}", err);
+                if path == "/settings" {
+                  if method == "POST" {
+                    match serde_json::from_slice::<ScrobbleConfigUpdate>(body) {
+                      Ok(update) => {
+                        let mut cfg = load_scrobble_config(&app_clone);
+                        if let Some(v) = update.threshold {
+                          cfg.threshold = v.clamp(0.01, 1.0);
+                        }
+                        if let Some(v) = update.enable_scrobble {
+                          cfg.enable_scrobble = v;
+                        }
+                        if let Some(v) = update.enable_now_playing {
+                          cfg.enable_now_playing = v;
+                        }
+                        if let Some(v) = update.enable_notifications {
+                          cfg.enable_notifications = v;
+                        }
+                        let _ = save_scrobble_config(&app_clone, &cfg);
+                        let body = serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string());
+                        let response = format!(
+                          "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
+                          body
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        let _ = socket.shutdown().await;
+                        return;
+                      }
+                      Err(err) => {
+                        log::warn!("[Last.fm] Settings JSON parse failed: {}", err);
+                      }
                     }
                   }
-                  Err(err) => {
-                    log::warn!("[Last.fm] Playback server JSON parse failed: {}", err);
+                } else if path == "/playback" {
+                  log::info!("[Last.fm] Playback server received {} bytes", body.len());
+                  match serde_json::from_slice::<PlaybackPayload>(body) {
+                    Ok(payload) => {
+                      if let Err(err) = handle_playback(app_clone.clone(), &state_clone, payload).await {
+                        log::warn!("[Last.fm] handle_playback from server failed: {}", err);
+                      }
+                    }
+                    Err(err) => {
+                      log::warn!("[Last.fm] Playback server JSON parse failed: {}", err);
+                    }
                   }
                 }
-              } else {
-                log::warn!("[Last.fm] Playback server missing content-length");
+              } else if method == "GET" && path == "/settings" {
+                let cfg = load_scrobble_config(&app_clone);
+                let body = serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string());
+                let response = format!(
+                  "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
+                  body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+                return;
               }
               break;
             }
@@ -1223,7 +1397,7 @@ fn start_playback_server(
             buf.resize(buf.len() * 2, 0);
           }
         }
-        let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok").await;
+        let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\nok").await;
         let _ = socket.shutdown().await;
       });
     }
