@@ -510,13 +510,22 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           let lastLoggedTrack = null;
 
           const grabMeta = () => {
+            const toSeconds = (text) => {
+              if (!text) return 0;
+              const match = text.match(/(\d{1,2}:)?\d{1,2}:\d{2}/g);
+              const raw = match ? match[match.length - 1] : text.trim();
+              const parts = raw.split(':').map((p) => parseInt(p, 10));
+              if (!parts.length || parts.some((p) => Number.isNaN(p))) return 0;
+              return parts.reduce((acc, part) => acc * 60 + part, 0);
+            };
+
             const audio = document.querySelector('audio');
             if (!audio && logCount < 5) {
               console.info('[MSCD] No audio element found yet');
               logCount += 1;
             }
             const posMs = audio ? Math.floor((audio.currentTime || 0) * 1000) : 0;
-            const paused = audio ? !!audio.paused : false;
+            let paused = audio ? !!audio.paused : true;
 
             let title = null;
             let artist = null;
@@ -531,20 +540,65 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
             }
 
             if (!title || !artist) {
-              const titleEl = document.querySelector('.playbackSoundBadge__titleLink') || document.querySelector('.playbackSoundBadge__title');
+              const titleEl = document.querySelector('.playbackSoundBadge__titleLink span[aria-hidden="true"]')
+                || document.querySelector('.playbackSoundBadge__titleLink')
+                || document.querySelector('.playbackSoundBadge__title');
               const artistEl = document.querySelector('.playbackSoundBadge__lightLink');
               title = title || (titleEl ? titleEl.textContent?.trim() : null);
               artist = artist || (artistEl ? artistEl.textContent?.trim() : null);
             }
 
-            const trackId = window.location.pathname || title || 'unknown';
+            if (title) {
+              title = title.replace(/^Current track:\s*/i, '').trim();
+            }
+
+            if (navigator.mediaSession?.playbackState) {
+              paused = navigator.mediaSession.playbackState !== 'playing';
+            } else if (!audio) {
+              const playBtn = document.querySelector('.playControls__play');
+              const label = playBtn?.getAttribute('aria-label') || '';
+              if (label) {
+                paused = !/pause/i.test(label);
+              } else if (playBtn?.classList.contains('playing')) {
+                paused = false;
+              }
+            }
+
+            const durationText =
+              document.querySelector('.playbackTimeline__duration span[aria-hidden="true"]')?.textContent ||
+              document.querySelector('.playbackTimeline__duration')?.textContent ||
+              '';
+            const passedText =
+              document.querySelector('.playbackTimeline__timePassed span[aria-hidden="true"]')?.textContent ||
+              document.querySelector('.playbackTimeline__timePassed')?.textContent ||
+              '';
+
+            const durationSec = toSeconds(durationText);
+            const passedSec = toSeconds(passedText);
+            if (!durationMs && durationSec) durationMs = Math.floor(durationSec * 1000);
+            let positionMs = posMs || (passedSec ? Math.floor(passedSec * 1000) : 0);
+
+            const slider = document.querySelector('.playbackTimeline__progressWrapper[role="progressbar"][aria-valuenow][aria-valuemax]');
+            if (slider) {
+              const maxVal = parseFloat(slider.getAttribute('aria-valuemax') || '0');
+              const nowVal = parseFloat(slider.getAttribute('aria-valuenow') || '0');
+              if (!durationMs && maxVal > 100) {
+                durationMs = Math.floor(maxVal * 1000);
+              }
+              if (!positionMs && nowVal > 0 && maxVal > 0) {
+                positionMs = Math.floor(nowVal * 1000);
+              }
+            }
+
+            const trackHref = document.querySelector('.playbackSoundBadge__titleLink')?.getAttribute('href');
+            const trackId = trackHref || window.location.pathname || title || 'unknown';
 
             return {
               trackId,
               title,
               artist,
               durationMs,
-              positionMs: posMs,
+              positionMs,
               paused,
               ts: Date.now(),
             };
