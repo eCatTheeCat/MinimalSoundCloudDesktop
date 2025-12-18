@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::Manager;
+use tauri::{Manager, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 use serde::Deserialize;
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -1051,6 +1051,7 @@ struct TrackState {
   last_pos_ms: u64,
   scrobbled: bool,
   now_playing_sent: bool,
+  paused: bool,
 }
 
 #[derive(Default)]
@@ -1128,9 +1129,10 @@ async fn handle_playback(
     }
   };
 
-  let (now_playing_to_send, scrobble_to_send) = {
+  let (now_playing_to_send, scrobble_to_send, clear_flag) = {
     let mut state_lock = state.lock().unwrap();
     let mut now_playing_to_send: Option<TrackState> = None;
+    let mut clear_now_playing = false;
     let mut scrobble_to_send: Option<TrackState> = None;
 
     let is_new_track = match &state_lock.current {
@@ -1162,11 +1164,8 @@ async fn handle_playback(
         last_pos_ms: payload.position_ms,
         scrobbled: false,
         now_playing_sent: false,
+        paused: payload.paused,
       };
-      if cfg.enable_now_playing {
-        now_playing_to_send = Some(t.clone());
-        t.now_playing_sent = true;
-      }
       state_lock.current = Some(t);
     } else if let Some(current) = state_lock.current.as_mut() {
       let delta = if payload.position_ms > current.last_pos_ms {
@@ -1177,7 +1176,21 @@ async fn handle_playback(
       if !payload.paused {
         current.listened_ms = current.listened_ms.saturating_add(delta);
       }
+      // pause transition
+      if cfg.enable_now_playing && payload.paused && !current.paused {
+        clear_now_playing = true;
+      }
+      // send now playing after playback actually starts
+      if cfg.enable_now_playing
+        && !current.now_playing_sent
+        && !payload.paused
+        && payload.position_ms > 1000
+      {
+        now_playing_to_send = Some(current.clone());
+        current.now_playing_sent = true;
+      }
       current.last_pos_ms = payload.position_ms;
+      current.paused = payload.paused;
 
       let threshold_ms = (current.duration_ms as f32 * cfg.threshold).round() as u64;
       if !current.scrobbled && current.listened_ms >= threshold_ms && current.duration_ms > 0 {
@@ -1192,9 +1205,18 @@ async fn handle_playback(
       }
     }
 
-    (now_playing_to_send, scrobble_to_send)
+    (now_playing_to_send, scrobble_to_send, clear_now_playing)
   };
 
+  if clear_flag {
+    if cfg.enable_now_playing {
+      if let Err(err) = clear_now_playing(&session, &api_key, &api_secret).await {
+        log::warn!("[Last.fm] clear now playing failed: {}", err);
+      } else {
+        log::info!("[Last.fm] now playing cleared (pause)");
+      }
+    }
+  }
   if let Some(track) = now_playing_to_send {
     match send_now_playing(&session, &api_key, &api_secret, &track).await {
       Ok(_) => log::info!("[Last.fm] now playing sent for '{}'", track.title),
@@ -1381,6 +1403,22 @@ async fn send_scrobble(session: &LastfmSession, api_key: &str, api_secret: &str,
       ("artist[0]", track.artist.clone()),
       ("duration[0]", track.duration_ms.to_string()),
       ("timestamp[0]", ts.to_string()),
+    ],
+    api_key,
+    api_secret,
+    &session.session_key,
+  )
+  .await
+}
+
+async fn clear_now_playing(session: &LastfmSession, api_key: &str, api_secret: &str) -> Result<(), String> {
+  // Hacky: send a 1-second placeholder to effectively clear "Now Playing".
+  lastfm_call(
+    "track.updateNowPlaying",
+    vec![
+      ("track", "Stopped".to_string()),
+      ("artist", "".to_string()),
+      ("duration", "1".to_string()),
     ],
     api_key,
     api_secret,
@@ -1790,6 +1828,27 @@ pub fn run() {
       {
         start_dev_callback_server(app.handle().clone());
       }
+      // Clear stale now-playing on startup
+      {
+        let app_handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+          let cfg = load_scrobble_config(&app_handle);
+          if !cfg.enable_now_playing {
+            return;
+          }
+          if let (Some(session), Some(api_key), Some(api_secret)) = (
+            get_lastfm_session(&app_handle),
+            lastfm_key(),
+            lastfm_secret(),
+          ) {
+            if let Err(err) = clear_now_playing(&session, &api_key, &api_secret).await {
+              log::warn!("[Last.fm] Failed to clear now playing on startup: {}", err);
+            } else {
+              log::info!("[Last.fm] Cleared now playing on startup");
+            }
+          }
+        });
+      }
       #[cfg(desktop)]
       {
         let handle = app.handle().clone();
@@ -1821,6 +1880,30 @@ pub fn run() {
             });
           }
         });
+        if let Some(win) = handle.get_window("main") {
+          win.on_window_event(move |e| {
+            if let WindowEvent::CloseRequested { .. } = e {
+              let app_handle = win.app_handle().clone();
+              tauri::async_runtime::spawn(async move {
+                let cfg = load_scrobble_config(&app_handle);
+                if !cfg.enable_now_playing {
+                  return;
+                }
+                if let (Some(session), Some(api_key), Some(api_secret)) = (
+                  get_lastfm_session(&app_handle),
+                  lastfm_key(),
+                  lastfm_secret(),
+                ) {
+                  if let Err(err) = clear_now_playing(&session, &api_key, &api_secret).await {
+                    log::warn!("[Last.fm] Failed to clear now playing on shutdown: {}", err);
+                  } else {
+                    log::info!("[Last.fm] Cleared now playing on shutdown");
+                  }
+                }
+              });
+            }
+          });
+        }
       }
       Ok(())
     })
