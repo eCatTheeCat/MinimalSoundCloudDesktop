@@ -86,7 +86,7 @@ fn lastfm_callback() -> String {
   }
 }
 
-fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, playback_url: &str) -> String {
+fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, playback_url: &str, initial_settings: &str) -> String {
   let auth_url = format!(
     "https://www.last.fm/api/auth/?api_key={}&cb={}",
     lastfm_key, lastfm_callback
@@ -97,6 +97,8 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
       console.info('[MSCD] Overlay script loaded');
       if (window.__minimal_sc_overlay_installed) return;
       window.__minimal_sc_overlay_installed = true;
+
+      const initialSettings = {initial_settings};
 
       const getInvoker = () => {
         try {
@@ -733,6 +735,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
 
         const settingsUrl = endpoint ? endpoint.replace(/\/playback$/, '/settings') : '';
         const eventsUrl = endpoint ? endpoint.replace(/\/playback$/, '/events') : '';
+        console.info('[MSCD] Endpoints', { endpoint, settingsUrl, eventsUrl });
 
         const showToast = (ev) => {
           if (!toastHost) return;
@@ -759,6 +762,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
 
         const startEventPoller = () => {
           if (!eventsUrl) return;
+          console.info('[MSCD] Event poller start', eventsUrl);
           const poll = async () => {
             try {
               const res = await fetch(eventsUrl, { method: 'GET', mode: 'cors' });
@@ -774,8 +778,11 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           poll();
         };
 
+        let lastAppliedCfg = null;
+
         const applySettings = (cfg) => {
           if (!cfg) return;
+          lastAppliedCfg = cfg;
           if (typeof cfg.threshold === 'number') {
             const percent = Math.max(1, Math.min(100, Math.round(cfg.threshold * 100)));
             thresholdRow.slider.value = String(percent);
@@ -793,6 +800,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           if (cfg.notification_mode) {
             notifyModeRow.select.value = cfg.notification_mode;
           }
+          shell.dataset.dirty = '';
         };
 
         const gatherSettings = () => ({
@@ -804,7 +812,11 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         });
 
         const loadSettings = async () => {
-          if (!settingsUrl) return;
+          if (!settingsUrl) {
+            console.warn('[MSCD] settingsUrl missing; skipping load');
+            return;
+          }
+          console.info('[MSCD] Loading settings from', settingsUrl);
           try {
             const res = await fetch(settingsUrl, { method: 'GET', mode: 'cors' });
             if (!res.ok) {
@@ -814,15 +826,31 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
             const cfg = await res.json();
             console.info('[MSCD] Loaded settings', cfg);
             applySettings(cfg);
+            shell.dataset.dirty = '';
           } catch (err) {
             console.warn('[MSCD] settings load error', err);
           }
         };
 
         const saveSettings = async () => {
-          if (!settingsUrl) return;
+          if (!settingsUrl) {
+            console.warn('[MSCD] settingsUrl missing; skip save');
+            return;
+          }
           const payload = gatherSettings();
           console.info('[MSCD] Saving settings', payload);
+          let sent = false;
+          try {
+            if (navigator.sendBeacon) {
+              const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+              sent = navigator.sendBeacon(settingsUrl, blob);
+              if (sent) {
+                console.info('[MSCD] settings sent via sendBeacon');
+              }
+            }
+          } catch (e) {
+            console.warn('[MSCD] sendBeacon settings failed', e);
+          }
           try {
             const res = await fetch(settingsUrl, {
               method: 'POST',
@@ -840,18 +868,34 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
             console.warn('[MSCD] settings save error', err);
           }
         };
-        slider?.addEventListener('change', () => {
-          saveSettings();
-        });
+        const markDirty = () => {
+          shell.dataset.dirty = '1';
+        };
 
-        scrobbleToggle.input.addEventListener('change', saveSettings);
-        nowPlayingRow.input.addEventListener('change', saveSettings);
-        notifyRow.input.addEventListener('change', saveSettings);
-        notifyModeRow.select.addEventListener('change', saveSettings);
-        loadSettings().finally(() => {
-          startScrobbleObserver();
-          startEventPoller();
-        });
+        let handlersAttached = false;
+        const attachHandlers = () => {
+          if (handlersAttached) return;
+          handlersAttached = true;
+          console.info('[MSCD] Settings handlers attached');
+          slider?.addEventListener('change', () => { markDirty(); saveSettings(); });
+          scrobbleToggle.input.addEventListener('change', () => { markDirty(); saveSettings(); });
+          nowPlayingRow.input.addEventListener('change', () => { markDirty(); saveSettings(); });
+          notifyRow.input.addEventListener('change', () => { markDirty(); saveSettings(); });
+          notifyModeRow.select.addEventListener('change', () => { markDirty(); saveSettings(); });
+        };
+
+        if (initialSettings && typeof initialSettings === 'object') {
+          console.info('[MSCD] Applying initial settings', initialSettings);
+          applySettings(initialSettings);
+        }
+
+        // Attach immediately so UI reacts even if load stalls.
+        attachHandlers();
+        startScrobbleObserver();
+        startEventPoller();
+
+        // Then hydrate from persisted settings.
+        loadSettings();
         console.info('[MSCD] Overlay injected');
         } catch (err) {
           console.warn('[MSCD] Overlay inject failed', err);
@@ -875,6 +919,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
     .replace("{key}", lastfm_key)
     .replace("{version}", version)
     .replace("{playback_url}", playback_url)
+    .replace("{initial_settings}", initial_settings)
 }
 
 fn get_store(app: &tauri::AppHandle) -> Result<Arc<Store<tauri::Wry>>, String> {
@@ -1482,7 +1527,7 @@ fn start_playback_server(
           continue;
         }
       };
-      //log::info!("[Last.fm] Playback server accepted connection");
+      log::info!("[Last.fm] Playback server accepted connection");
       let app_clone = app_handle.clone();
       let state_clone = state_for_server.clone();
       tauri::async_runtime::spawn(async move {
@@ -1506,14 +1551,15 @@ fn start_playback_server(
             if let Some(idx) = twoway::find_bytes(&buf[..total_read], b"\r\n\r\n") {
               let headers = &buf[..idx];
               let header_str = String::from_utf8_lossy(headers);
-              if let Some(line) = header_str.lines().next() {
-                let mut parts = line.split_whitespace();
-                method = parts.next().unwrap_or("").to_string();
-                path = parts.next().unwrap_or("").to_string();
-              }
-              for line in headers.split(|b| *b == b'\n') {
-                if let Some(pos) = line.iter().position(|b| *b == b':') {
-                  let (name, val) = line.split_at(pos);
+            if let Some(line) = header_str.lines().next() {
+              let mut parts = line.split_whitespace();
+              method = parts.next().unwrap_or("").to_string();
+              path = parts.next().unwrap_or("").to_string();
+            }
+            log::info!("[HTTP] {} {}", method, path);
+            for line in headers.split(|b| *b == b'\n') {
+              if let Some(pos) = line.iter().position(|b| *b == b':') {
+                let (name, val) = line.split_at(pos);
                   if name.eq_ignore_ascii_case(b"content-length") {
                     if let Ok(len_str) = std::str::from_utf8(&val[1..]).map(|s| s.trim()) {
                       if let Ok(len) = len_str.parse::<usize>() {
@@ -1554,47 +1600,45 @@ fn start_playback_server(
                   total_read += n;
                 }
                 let body = &buf[body_start..std::cmp::min(total_read, body_start + len)];
-                if path == "/settings" {
-                if method == "POST" {
+                if path == "/settings" && method == "POST" {
                   match serde_json::from_slice::<ScrobbleConfigUpdate>(body) {
                     Ok(update) => {
                       let mut cfg = load_scrobble_config(&app_clone);
-                        if let Some(v) = update.threshold {
-                          cfg.threshold = v.clamp(0.01, 1.0);
-                        }
-                        if let Some(v) = update.enable_scrobble {
-                          cfg.enable_scrobble = v;
-                        }
-                        if let Some(v) = update.enable_now_playing {
-                          cfg.enable_now_playing = v;
-                        }
-                        if let Some(v) = update.enable_notifications {
-                          cfg.enable_notifications = v;
-                        }
-                        if let Some(v) = update.notification_mode {
-                          cfg.notification_mode = v;
-                        }
-                        let _ = save_scrobble_config(&app_clone, &cfg);
-                        let body = serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string());
-                        let response = format!(
-                          "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
-                          body
-                        );
-                        log::info!(
-                          "[Settings] POST /settings threshold={} scrobble={} now_playing={} notifications={} mode={:?}",
-                          cfg.threshold,
-                          cfg.enable_scrobble,
-                          cfg.enable_now_playing,
-                          cfg.enable_notifications,
-                          cfg.notification_mode
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                        let _ = socket.shutdown().await;
-                        return;
+                      if let Some(v) = update.threshold {
+                        cfg.threshold = v.clamp(0.01, 1.0);
                       }
-                      Err(err) => {
-                        log::warn!("[Last.fm] Settings JSON parse failed: {}", err);
+                      if let Some(v) = update.enable_scrobble {
+                        cfg.enable_scrobble = v;
                       }
+                      if let Some(v) = update.enable_now_playing {
+                        cfg.enable_now_playing = v;
+                      }
+                      if let Some(v) = update.enable_notifications {
+                        cfg.enable_notifications = v;
+                      }
+                      if let Some(v) = update.notification_mode {
+                        cfg.notification_mode = v;
+                      }
+                      let _ = save_scrobble_config(&app_clone, &cfg);
+                      let body = serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string());
+                      let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
+                        body
+                      );
+                      log::info!(
+                        "[Settings] POST /settings threshold={} scrobble={} now_playing={} notifications={} mode={:?}",
+                        cfg.threshold,
+                        cfg.enable_scrobble,
+                        cfg.enable_now_playing,
+                        cfg.enable_notifications,
+                        cfg.notification_mode
+                      );
+                      let _ = socket.write_all(response.as_bytes()).await;
+                      let _ = socket.shutdown().await;
+                      return;
+                    }
+                    Err(err) => {
+                      log::warn!("[Last.fm] Settings JSON parse failed: {}", err);
                     }
                   }
                 } else if path == "/playback" {
@@ -1786,7 +1830,9 @@ pub fn run() {
       let version = version.clone();
       move |window, _| {
         let playback_url = playback_url_for_load.lock().unwrap().clone();
-        let script = build_overlay_script(&key_for_overlay, &lastfm_cb, &version, &playback_url);
+        let initial_cfg = load_scrobble_config(&window.app_handle());
+        let initial_settings = serde_json::to_string(&initial_cfg).unwrap_or_else(|_| "{}".to_string());
+        let script = build_overlay_script(&key_for_overlay, &lastfm_cb, &version, &playback_url, &initial_settings);
       let _ = window.eval(&script);
       }
     });
