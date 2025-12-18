@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::Manager;
+use tauri_plugin_notification::NotificationExt;
 use serde::Deserialize;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
@@ -205,6 +206,40 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           .modal header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
           .close { height: 32px; padding: 0 10px; }
           .warning { color: #ffb95f; font-size: 12px; }
+          .toast-container {
+            position: fixed;
+            top: 60px;
+            right: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            pointer-events: none;
+            z-index: 2147483647;
+          }
+          .toast {
+            min-width: 220px;
+            max-width: 320px;
+            background: rgba(18, 22, 31, 0.95);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 10px;
+            padding: 10px 12px;
+            color: #e9ecf5;
+            box-shadow: 0 16px 30px rgba(0,0,0,0.35);
+            backdrop-filter: blur(6px);
+            pointer-events: auto;
+            animation: toast-in 140ms ease;
+          }
+          .toast h4 {
+            margin: 0 0 4px 0;
+            font-size: 14px;
+          }
+          .toast .muted { font-size: 12px; }
+          .toast.success { border-color: rgba(72, 207, 173, 0.6); }
+          .toast.error { border-color: rgba(255, 149, 128, 0.7); }
+          @keyframes toast-in {
+            from { opacity: 0; transform: translateY(-6px); }
+            to { opacity: 1; transform: translateY(0); }
+          }
         `;
         shadow.appendChild(style);
 
@@ -303,6 +338,29 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           return { row, slider, val };
         };
 
+        const makeSelectRow = (labelText, options) => {
+          const row = document.createElement('div');
+          row.className = 'row';
+          const label = document.createElement('span');
+          label.textContent = labelText;
+          const select = document.createElement('select');
+          select.style.height = '30px';
+          select.style.borderRadius = '8px';
+          select.style.padding = '4px 8px';
+          select.style.background = '#1b202b';
+          select.style.color = '#e9ecf5';
+          select.style.border = '1px solid rgba(255,255,255,0.16)';
+          select.style.minWidth = '180px';
+          options.forEach(({ label, value }) => {
+            const opt = document.createElement('option');
+            opt.value = value;
+            opt.textContent = label;
+            select.appendChild(opt);
+          });
+          row.append(label, select);
+          return { row, select };
+        };
+
         const makeLastfmRow = (authUrl, keyMissing, warnText) => {
           const row = document.createElement('div');
           row.className = 'row';
@@ -377,7 +435,11 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         const thresholdRow = makeSliderRow();
         const nowPlayingRow = makeToggleRow('Send \"Now Playing\"');
         const notifyRow = makeToggleRow('Show scrobble notifications');
-        secScrobble.append(s2Title, scrobbleToggle.row, thresholdRow.row, nowPlayingRow.row, notifyRow.row);
+        const notifyModeRow = makeSelectRow('Notification style', [
+          { label: 'In-app toast', value: 'in_app' },
+          { label: 'System notification', value: 'system' },
+        ]);
+        secScrobble.append(s2Title, scrobbleToggle.row, thresholdRow.row, nowPlayingRow.row, notifyRow.row, notifyModeRow.row);
 
         const secLastfm = document.createElement('div');
         secLastfm.className = 'section';
@@ -502,7 +564,10 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           label.textContent = `${slider.value}%`;
         });
 
-        shadow.append(shell, backdrop);
+        const toastHost = document.createElement('div');
+        toastHost.className = 'toast-container';
+
+        shadow.append(shell, backdrop, toastHost);
 
         refreshLastfmStatus();
 
@@ -667,6 +732,47 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         };
 
         const settingsUrl = endpoint ? endpoint.replace(/\/playback$/, '/settings') : '';
+        const eventsUrl = endpoint ? endpoint.replace(/\/playback$/, '/events') : '';
+
+        const showToast = (ev) => {
+          if (!toastHost) return;
+          const node = document.createElement('div');
+          node.className = `toast ${ev.kind === 'scrobble_failed' ? 'error' : 'success'}`;
+          const h4 = document.createElement('h4');
+          h4.textContent = ev.kind === 'scrobble_failed' ? 'Scrobble failed' : 'Scrobbled';
+          const body = document.createElement('div');
+          body.className = 'muted';
+          body.textContent = `${ev.title} — ${ev.artist}`;
+          node.append(h4, body);
+          if (ev.message) {
+            const msg = document.createElement('div');
+            msg.className = 'muted';
+            msg.textContent = ev.message;
+            node.appendChild(msg);
+          }
+          toastHost.appendChild(node);
+          setTimeout(() => {
+            node.style.opacity = '0';
+            setTimeout(() => node.remove(), 250);
+          }, 4000);
+        };
+
+        const startEventPoller = () => {
+          if (!eventsUrl) return;
+          const poll = async () => {
+            try {
+              const res = await fetch(eventsUrl, { method: 'GET', mode: 'cors' });
+              if (!res.ok) return;
+              const data = await res.json();
+              (data.events || []).forEach(showToast);
+            } catch (err) {
+              // ignore
+            } finally {
+              setTimeout(poll, 3000);
+            }
+          };
+          poll();
+        };
 
         const applySettings = (cfg) => {
           if (!cfg) return;
@@ -684,6 +790,9 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           if (typeof cfg.enable_notifications === 'boolean') {
             notifyRow.input.checked = cfg.enable_notifications;
           }
+          if (cfg.notification_mode) {
+            notifyModeRow.select.value = cfg.notification_mode;
+          }
         };
 
         const gatherSettings = () => ({
@@ -691,6 +800,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           enable_scrobble: scrobbleToggle.input.checked,
           enable_now_playing: nowPlayingRow.input.checked,
           enable_notifications: notifyRow.input.checked,
+          notification_mode: notifyModeRow.select.value,
         });
 
         const loadSettings = async () => {
@@ -737,8 +847,10 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         scrobbleToggle.input.addEventListener('change', saveSettings);
         nowPlayingRow.input.addEventListener('change', saveSettings);
         notifyRow.input.addEventListener('change', saveSettings);
+        notifyModeRow.select.addEventListener('change', saveSettings);
         loadSettings().finally(() => {
           startScrobbleObserver();
+          startEventPoller();
         });
         console.info('[MSCD] Overlay injected');
         } catch (err) {
@@ -782,11 +894,12 @@ fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
     if let Some(val) = store.get("scrobble_config") {
       if let Ok(cfg) = serde_json::from_value::<ScrobbleConfig>(val) {
         log::info!(
-          "[Settings] Loaded scrobble_config threshold={} scrobble={} now_playing={} notifications={}",
+          "[Settings] Loaded scrobble_config threshold={} scrobble={} now_playing={} notifications={} mode={:?}",
           cfg.threshold,
           cfg.enable_scrobble,
           cfg.enable_now_playing,
-          cfg.enable_notifications
+          cfg.enable_notifications,
+          cfg.notification_mode
         );
         return cfg;
       }
@@ -797,24 +910,27 @@ fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
     enable_scrobble: true,
     enable_now_playing: true,
     enable_notifications: true,
+    notification_mode: NotificationMode::InApp,
   };
   log::info!(
-    "[Settings] Using default scrobble_config threshold={} scrobble={} now_playing={} notifications={}",
+    "[Settings] Using default scrobble_config threshold={} scrobble={} now_playing={} notifications={} mode={:?}",
     cfg.threshold,
     cfg.enable_scrobble,
     cfg.enable_now_playing,
-    cfg.enable_notifications
+    cfg.enable_notifications,
+    cfg.notification_mode
   );
   cfg
 }
 
 fn save_scrobble_config(app: &tauri::AppHandle, cfg: &ScrobbleConfig) -> Result<(), String> {
   log::info!(
-    "[Settings] Saving scrobble_config threshold={} scrobble={} now_playing={} notifications={}",
+    "[Settings] Saving scrobble_config threshold={} scrobble={} now_playing={} notifications={} mode={:?}",
     cfg.threshold,
     cfg.enable_scrobble,
     cfg.enable_now_playing,
-    cfg.enable_notifications
+    cfg.enable_notifications,
+    cfg.notification_mode
   );
   let store = get_store(app)?;
   store.set(
@@ -843,6 +959,7 @@ struct ScrobbleConfig {
   enable_scrobble: bool,
   enable_now_playing: bool,
   enable_notifications: bool,
+  notification_mode: NotificationMode,
 }
 
 #[derive(Debug, serde::Deserialize, Default)]
@@ -852,6 +969,15 @@ struct ScrobbleConfigUpdate {
   enable_scrobble: Option<bool>,
   enable_now_playing: Option<bool>,
   enable_notifications: Option<bool>,
+  notification_mode: Option<NotificationMode>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum NotificationMode {
+  #[default]
+  InApp,
+  System,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -885,6 +1011,23 @@ struct TrackState {
 #[derive(Default)]
 struct ScrobbleState {
   current: Option<TrackState>,
+  events: std::collections::VecDeque<ToastEvent>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ToastKind {
+  Scrobble,
+  ScrobbleFailed,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ToastEvent {
+  kind: ToastKind,
+  title: String,
+  artist: String,
+  #[serde(default)]
+  message: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1015,8 +1158,54 @@ async fn handle_playback(
   }
   if let Some(track) = scrobble_to_send {
     match send_scrobble(&session, &api_key, &api_secret, &track).await {
-      Ok(_) => log::info!("[Last.fm] scrobbled '{}'", track.title),
-      Err(err) => log::warn!("[Last.fm] scrobble failed: {}", err),
+      Ok(_) => {
+        log::info!("[Last.fm] scrobbled '{}'", track.title);
+        if cfg.enable_notifications {
+          match cfg.notification_mode {
+            NotificationMode::InApp => {
+              let mut lock = state.lock().unwrap();
+              lock.events.push_back(ToastEvent {
+                kind: ToastKind::Scrobble,
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+                message: None,
+              });
+            }
+            NotificationMode::System => {
+              let _ = app
+                .notification()
+                .builder()
+                .title("Scrobbled")
+                .body(format!("{} — {}", track.title, track.artist))
+                .show();
+            }
+          }
+        }
+      }
+      Err(err) => {
+        log::warn!("[Last.fm] scrobble failed: {}", err);
+        if cfg.enable_notifications {
+          match cfg.notification_mode {
+            NotificationMode::InApp => {
+              let mut lock = state.lock().unwrap();
+              lock.events.push_back(ToastEvent {
+                kind: ToastKind::ScrobbleFailed,
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+                message: Some(err.clone()),
+              });
+            }
+            NotificationMode::System => {
+              let _ = app
+                .notification()
+                .builder()
+                .title("Scrobble failed")
+                .body(format!("{} — {}", track.title, track.artist))
+                .show();
+            }
+          }
+        }
+      }
     }
   }
 
@@ -1382,6 +1571,9 @@ fn start_playback_server(
                         if let Some(v) = update.enable_notifications {
                           cfg.enable_notifications = v;
                         }
+                        if let Some(v) = update.notification_mode {
+                          cfg.notification_mode = v;
+                        }
                         let _ = save_scrobble_config(&app_clone, &cfg);
                         let body = serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string());
                         let response = format!(
@@ -1389,11 +1581,12 @@ fn start_playback_server(
                           body
                         );
                         log::info!(
-                          "[Settings] POST /settings threshold={} scrobble={} now_playing={} notifications={}",
+                          "[Settings] POST /settings threshold={} scrobble={} now_playing={} notifications={} mode={:?}",
                           cfg.threshold,
                           cfg.enable_scrobble,
                           cfg.enable_now_playing,
-                          cfg.enable_notifications
+                          cfg.enable_notifications,
+                          cfg.notification_mode
                         );
                         let _ = socket.write_all(response.as_bytes()).await;
                         let _ = socket.shutdown().await;
@@ -1416,6 +1609,21 @@ fn start_playback_server(
                       log::warn!("[Last.fm] Playback server JSON parse failed: {}", err);
                     }
                   }
+                } else if path == "/events" && method == "GET" {
+                  let events = {
+                    let mut lock = state_clone.lock().unwrap();
+                    lock.events.drain(..).collect::<Vec<ToastEvent>>()
+                  };
+                  let body = serde_json::to_string(&serde_json::json!({ "events": events }))
+                    .unwrap_or_else(|_| "{}".to_string());
+                  let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
+                    body
+                  );
+                  log::info!("[Events] GET /events returned {}", events.len());
+                  let _ = socket.write_all(response.as_bytes()).await;
+                  let _ = socket.shutdown().await;
+                  return;
                 }
               } else if method == "GET" && path == "/settings" {
                 let cfg = load_scrobble_config(&app_clone);
@@ -1425,12 +1633,28 @@ fn start_playback_server(
                   body
                 );
                 log::info!(
-                  "[Settings] GET /settings threshold={} scrobble={} now_playing={} notifications={}",
+                  "[Settings] GET /settings threshold={} scrobble={} now_playing={} notifications={} mode={:?}",
                   cfg.threshold,
                   cfg.enable_scrobble,
                   cfg.enable_now_playing,
-                  cfg.enable_notifications
+                  cfg.enable_notifications,
+                  cfg.notification_mode
                 );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+                return;
+              } else if method == "GET" && path == "/events" {
+                let events = {
+                  let mut lock = state_clone.lock().unwrap();
+                  lock.events.drain(..).collect::<Vec<ToastEvent>>()
+                };
+                let body = serde_json::to_string(&serde_json::json!({ "events": events }))
+                  .unwrap_or_else(|_| "{}".to_string());
+                let response = format!(
+                  "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
+                  body
+                );
+                log::info!("[Events] GET /events returned {} events", events.len());
                 let _ = socket.write_all(response.as_bytes()).await;
                 let _ = socket.shutdown().await;
                 return;
@@ -1479,6 +1703,7 @@ pub fn run() {
   builder = builder
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_store::Builder::default().build())
+    .plugin(tauri_plugin_notification::init())
     .plugin(tauri_plugin_deep_link::init())
     .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
       log::info!("[Last.fm] Single-instance callback with argv: {:?}", argv);
