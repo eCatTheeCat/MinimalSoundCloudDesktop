@@ -110,6 +110,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
       function inject() {
         try {
         console.info('[MSCD] Injecting overlay');
+        const endpoint = '{playback_url}';
         const host = document.createElement('div');
         host.id = 'mscd-overlay-host';
         host.style.position = 'fixed';
@@ -507,7 +508,6 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
 
         // --- Scrobble observer (MediaSession primary, DOM fallback) ---
         const startScrobbleObserver = () => {
-          const endpoint = '{playback_url}';
           console.info('[MSCD] Scrobble observer starting, endpoint:', endpoint);
           if (!endpoint) {
             console.warn('[MSCD] playback endpoint missing, observer disabled');
@@ -666,9 +666,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           });
         };
 
-        startScrobbleObserver();
-
-        const settingsUrl = endpoint.replace(/\/playback$/, '/settings');
+        const settingsUrl = endpoint ? endpoint.replace(/\/playback$/, '/settings') : '';
 
         const applySettings = (cfg) => {
           if (!cfg) return;
@@ -704,6 +702,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
               return;
             }
             const cfg = await res.json();
+            console.info('[MSCD] Loaded settings', cfg);
             applySettings(cfg);
           } catch (err) {
             console.warn('[MSCD] settings load error', err);
@@ -713,6 +712,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         const saveSettings = async () => {
           if (!settingsUrl) return;
           const payload = gatherSettings();
+          console.info('[MSCD] Saving settings', payload);
           try {
             const res = await fetch(settingsUrl, {
               method: 'POST',
@@ -737,7 +737,9 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         scrobbleToggle.input.addEventListener('change', saveSettings);
         nowPlayingRow.input.addEventListener('change', saveSettings);
         notifyRow.input.addEventListener('change', saveSettings);
-        loadSettings();
+        loadSettings().finally(() => {
+          startScrobbleObserver();
+        });
         console.info('[MSCD] Overlay injected');
         } catch (err) {
           console.warn('[MSCD] Overlay inject failed', err);
@@ -779,19 +781,41 @@ fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
   if let Some(store) = store {
     if let Some(val) = store.get("scrobble_config") {
       if let Ok(cfg) = serde_json::from_value::<ScrobbleConfig>(val) {
+        log::info!(
+          "[Settings] Loaded scrobble_config threshold={} scrobble={} now_playing={} notifications={}",
+          cfg.threshold,
+          cfg.enable_scrobble,
+          cfg.enable_now_playing,
+          cfg.enable_notifications
+        );
         return cfg;
       }
     }
   }
-  ScrobbleConfig {
+  let cfg = ScrobbleConfig {
     threshold: DEFAULT_THRESHOLD,
     enable_scrobble: true,
     enable_now_playing: true,
     enable_notifications: true,
-  }
+  };
+  log::info!(
+    "[Settings] Using default scrobble_config threshold={} scrobble={} now_playing={} notifications={}",
+    cfg.threshold,
+    cfg.enable_scrobble,
+    cfg.enable_now_playing,
+    cfg.enable_notifications
+  );
+  cfg
 }
 
 fn save_scrobble_config(app: &tauri::AppHandle, cfg: &ScrobbleConfig) -> Result<(), String> {
+  log::info!(
+    "[Settings] Saving scrobble_config threshold={} scrobble={} now_playing={} notifications={}",
+    cfg.threshold,
+    cfg.enable_scrobble,
+    cfg.enable_now_playing,
+    cfg.enable_notifications
+  );
   let store = get_store(app)?;
   store.set(
     "scrobble_config",
@@ -880,6 +904,7 @@ async fn handle_playback(
 ) -> Result<(), String> {
   let cfg = load_scrobble_config(&app);
   if !cfg.enable_scrobble {
+    log::info!("[Settings] Scrobbling disabled; skipping playback report");
     return Ok(());
   }
 
@@ -931,6 +956,12 @@ async fn handle_playback(
         payload.title,
         payload.artist,
         payload.duration_ms
+      );
+      log::info!(
+        "[Settings] Using threshold={} now_playing={} notifications={}",
+        cfg.threshold,
+        cfg.enable_now_playing,
+        cfg.enable_notifications
       );
       let mut t = TrackState {
         track_id: payload.track_id.clone(),
@@ -1262,7 +1293,7 @@ fn start_playback_server(
           continue;
         }
       };
-      log::info!("[Last.fm] Playback server accepted connection");
+      //log::info!("[Last.fm] Playback server accepted connection");
       let app_clone = app_handle.clone();
       let state_clone = state_for_server.clone();
       tauri::async_runtime::spawn(async move {
@@ -1335,10 +1366,10 @@ fn start_playback_server(
                 }
                 let body = &buf[body_start..std::cmp::min(total_read, body_start + len)];
                 if path == "/settings" {
-                  if method == "POST" {
-                    match serde_json::from_slice::<ScrobbleConfigUpdate>(body) {
-                      Ok(update) => {
-                        let mut cfg = load_scrobble_config(&app_clone);
+                if method == "POST" {
+                  match serde_json::from_slice::<ScrobbleConfigUpdate>(body) {
+                    Ok(update) => {
+                      let mut cfg = load_scrobble_config(&app_clone);
                         if let Some(v) = update.threshold {
                           cfg.threshold = v.clamp(0.01, 1.0);
                         }
@@ -1357,6 +1388,13 @@ fn start_playback_server(
                           "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
                           body
                         );
+                        log::info!(
+                          "[Settings] POST /settings threshold={} scrobble={} now_playing={} notifications={}",
+                          cfg.threshold,
+                          cfg.enable_scrobble,
+                          cfg.enable_now_playing,
+                          cfg.enable_notifications
+                        );
                         let _ = socket.write_all(response.as_bytes()).await;
                         let _ = socket.shutdown().await;
                         return;
@@ -1367,7 +1405,7 @@ fn start_playback_server(
                     }
                   }
                 } else if path == "/playback" {
-                  log::info!("[Last.fm] Playback server received {} bytes", body.len());
+                  //log::info!("[Last.fm] Playback server received {} bytes", body.len());
                   match serde_json::from_slice::<PlaybackPayload>(body) {
                     Ok(payload) => {
                       if let Err(err) = handle_playback(app_clone.clone(), &state_clone, payload).await {
@@ -1385,6 +1423,13 @@ fn start_playback_server(
                 let response = format!(
                   "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
                   body
+                );
+                log::info!(
+                  "[Settings] GET /settings threshold={} scrobble={} now_playing={} notifications={}",
+                  cfg.threshold,
+                  cfg.enable_scrobble,
+                  cfg.enable_now_playing,
+                  cfg.enable_notifications
                 );
                 let _ = socket.write_all(response.as_bytes()).await;
                 let _ = socket.shutdown().await;
