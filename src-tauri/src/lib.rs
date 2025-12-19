@@ -1037,6 +1037,7 @@ struct TrackState {
   started_at: u64,
   listened_ms: u64,
   last_pos_ms: u64,
+  last_update_ts_ms: u64,
   scrobbled: bool,
 }
 
@@ -1145,19 +1146,26 @@ async fn handle_playback(
         started_at: millis_now().saturating_sub(payload.position_ms),
         listened_ms: 0,
         last_pos_ms: payload.position_ms,
+        last_update_ts_ms: payload.ts,
         scrobbled: false,
       };
       state_lock.current = Some(t);
     } else if let Some(current) = state_lock.current.as_mut() {
-      let delta = if payload.position_ms > current.last_pos_ms {
-        payload.position_ms - current.last_pos_ms
-      } else {
-        0
-      };
+      let delta_pos = payload.position_ms.saturating_sub(current.last_pos_ms);
+      let delta_time = payload.ts.saturating_sub(current.last_update_ts_ms);
+
+      // Only count real listened time; if the position jump is larger than elapsed wall time,
+      // treat it as a seek and cap by delta_time.
       if !payload.paused {
-        current.listened_ms = current.listened_ms.saturating_add(delta);
+        let increment = if delta_pos > delta_time.saturating_add(1_500) {
+          delta_time
+        } else {
+          delta_pos
+        };
+        current.listened_ms = current.listened_ms.saturating_add(increment);
       }
       current.last_pos_ms = payload.position_ms;
+      current.last_update_ts_ms = payload.ts;
 
       let threshold_ms = (current.duration_ms as f32 * cfg.threshold).round() as u64;
       if !current.scrobbled && current.listened_ms >= threshold_ms && current.duration_ms > 0 {
