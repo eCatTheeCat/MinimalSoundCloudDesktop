@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::{Manager, WindowEvent};
+use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 use serde::Deserialize;
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -435,13 +435,12 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         s2Title.textContent = 'Scrobbling';
         const scrobbleToggle = makeToggleRow('Enable scrobbling');
         const thresholdRow = makeSliderRow();
-        const nowPlayingRow = makeToggleRow('Send \"Now Playing\"');
         const notifyRow = makeToggleRow('Show scrobble notifications');
         const notifyModeRow = makeSelectRow('Notification style', [
           { label: 'In-app toast', value: 'in_app' },
           { label: 'System notification', value: 'system' },
         ]);
-        secScrobble.append(s2Title, scrobbleToggle.row, thresholdRow.row, nowPlayingRow.row, notifyRow.row, notifyModeRow.row);
+        secScrobble.append(s2Title, scrobbleToggle.row, thresholdRow.row, notifyRow.row, notifyModeRow.row);
 
         const secLastfm = document.createElement('div');
         secLastfm.className = 'section';
@@ -791,9 +790,6 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           if (typeof cfg.enable_scrobble === 'boolean') {
             scrobbleToggle.input.checked = cfg.enable_scrobble;
           }
-          if (typeof cfg.enable_now_playing === 'boolean') {
-            nowPlayingRow.input.checked = cfg.enable_now_playing;
-          }
           if (typeof cfg.enable_notifications === 'boolean') {
             notifyRow.input.checked = cfg.enable_notifications;
           }
@@ -806,7 +802,6 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         const gatherSettings = () => ({
           threshold: Math.max(0.01, Math.min(1, Number(thresholdRow.slider.value) / 100)),
           enable_scrobble: scrobbleToggle.input.checked,
-          enable_now_playing: nowPlayingRow.input.checked,
           enable_notifications: notifyRow.input.checked,
           notification_mode: notifyModeRow.select.value,
         });
@@ -879,7 +874,6 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           console.info('[MSCD] Settings handlers attached');
           slider?.addEventListener('change', () => { markDirty(); saveSettings(); });
           scrobbleToggle.input.addEventListener('change', () => { markDirty(); saveSettings(); });
-          nowPlayingRow.input.addEventListener('change', () => { markDirty(); saveSettings(); });
           notifyRow.input.addEventListener('change', () => { markDirty(); saveSettings(); });
           notifyModeRow.select.addEventListener('change', () => { markDirty(); saveSettings(); });
         };
@@ -939,10 +933,9 @@ fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
     if let Some(val) = store.get("scrobble_config") {
       if let Ok(cfg) = serde_json::from_value::<ScrobbleConfig>(val) {
         log::info!(
-          "[Settings] Loaded scrobble_config threshold={} scrobble={} now_playing={} notifications={} mode={:?}",
+          "[Settings] Loaded scrobble_config threshold={} scrobble={} notifications={} mode={:?}",
           cfg.threshold,
           cfg.enable_scrobble,
-          cfg.enable_now_playing,
           cfg.enable_notifications,
           cfg.notification_mode
         );
@@ -953,15 +946,13 @@ fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
   let cfg = ScrobbleConfig {
     threshold: DEFAULT_THRESHOLD,
     enable_scrobble: true,
-    enable_now_playing: true,
     enable_notifications: true,
     notification_mode: NotificationMode::InApp,
   };
   log::info!(
-    "[Settings] Using default scrobble_config threshold={} scrobble={} now_playing={} notifications={} mode={:?}",
+    "[Settings] Using default scrobble_config threshold={} scrobble={} notifications={} mode={:?}",
     cfg.threshold,
     cfg.enable_scrobble,
-    cfg.enable_now_playing,
     cfg.enable_notifications,
     cfg.notification_mode
   );
@@ -970,10 +961,9 @@ fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
 
 fn save_scrobble_config(app: &tauri::AppHandle, cfg: &ScrobbleConfig) -> Result<(), String> {
   log::info!(
-    "[Settings] Saving scrobble_config threshold={} scrobble={} now_playing={} notifications={} mode={:?}",
+    "[Settings] Saving scrobble_config threshold={} scrobble={} notifications={} mode={:?}",
     cfg.threshold,
     cfg.enable_scrobble,
-    cfg.enable_now_playing,
     cfg.enable_notifications,
     cfg.notification_mode
   );
@@ -1002,7 +992,6 @@ struct LastfmSession {
 struct ScrobbleConfig {
   threshold: f32,
   enable_scrobble: bool,
-  enable_now_playing: bool,
   enable_notifications: bool,
   notification_mode: NotificationMode,
 }
@@ -1012,7 +1001,6 @@ struct ScrobbleConfig {
 struct ScrobbleConfigUpdate {
   threshold: Option<f32>,
   enable_scrobble: Option<bool>,
-  enable_now_playing: Option<bool>,
   enable_notifications: Option<bool>,
   notification_mode: Option<NotificationMode>,
 }
@@ -1050,8 +1038,6 @@ struct TrackState {
   listened_ms: u64,
   last_pos_ms: u64,
   scrobbled: bool,
-  now_playing_sent: bool,
-  paused: bool,
 }
 
 #[derive(Default)]
@@ -1129,10 +1115,8 @@ async fn handle_playback(
     }
   };
 
-  let (now_playing_to_send, scrobble_to_send, clear_flag) = {
+  let scrobble_to_send = {
     let mut state_lock = state.lock().unwrap();
-    let mut now_playing_to_send: Option<TrackState> = None;
-    let mut clear_now_playing = false;
     let mut scrobble_to_send: Option<TrackState> = None;
 
     let is_new_track = match &state_lock.current {
@@ -1148,9 +1132,8 @@ async fn handle_playback(
         payload.duration_ms
       );
       log::info!(
-        "[Settings] Using threshold={} now_playing={} notifications={}",
+        "[Settings] Using threshold={} notifications={}",
         cfg.threshold,
-        cfg.enable_now_playing,
         cfg.enable_notifications
       );
       let t = TrackState {
@@ -1163,8 +1146,6 @@ async fn handle_playback(
         listened_ms: 0,
         last_pos_ms: payload.position_ms,
         scrobbled: false,
-        now_playing_sent: false,
-        paused: payload.paused,
       };
       state_lock.current = Some(t);
     } else if let Some(current) = state_lock.current.as_mut() {
@@ -1176,21 +1157,7 @@ async fn handle_playback(
       if !payload.paused {
         current.listened_ms = current.listened_ms.saturating_add(delta);
       }
-      // pause transition
-      if cfg.enable_now_playing && payload.paused && !current.paused {
-        clear_now_playing = true;
-      }
-      // send now playing after playback actually starts
-      if cfg.enable_now_playing
-        && !current.now_playing_sent
-        && !payload.paused
-        && payload.position_ms > 1000
-      {
-        now_playing_to_send = Some(current.clone());
-        current.now_playing_sent = true;
-      }
       current.last_pos_ms = payload.position_ms;
-      current.paused = payload.paused;
 
       let threshold_ms = (current.duration_ms as f32 * cfg.threshold).round() as u64;
       if !current.scrobbled && current.listened_ms >= threshold_ms && current.duration_ms > 0 {
@@ -1205,24 +1172,9 @@ async fn handle_playback(
       }
     }
 
-    (now_playing_to_send, scrobble_to_send, clear_now_playing)
+    scrobble_to_send
   };
 
-  if clear_flag {
-    if cfg.enable_now_playing {
-      if let Err(err) = clear_now_playing(&session, &api_key, &api_secret).await {
-        log::warn!("[Last.fm] clear now playing failed: {}", err);
-      } else {
-        log::info!("[Last.fm] now playing cleared (pause)");
-      }
-    }
-  }
-  if let Some(track) = now_playing_to_send {
-    match send_now_playing(&session, &api_key, &api_secret, &track).await {
-      Ok(_) => log::info!("[Last.fm] now playing sent for '{}'", track.title),
-      Err(err) => log::warn!("[Last.fm] now playing failed: {}", err),
-    }
-  }
   if let Some(track) = scrobble_to_send {
     match send_scrobble(&session, &api_key, &api_secret, &track).await {
       Ok(_) => {
@@ -1379,21 +1331,6 @@ async fn lastfm_call(method: &str, params: Vec<(&str, String)>, api_key: &str, a
   Ok(())
 }
 
-async fn send_now_playing(session: &LastfmSession, api_key: &str, api_secret: &str, track: &TrackState) -> Result<(), String> {
-  lastfm_call(
-    "track.updateNowPlaying",
-    vec![
-      ("track", track.title.clone()),
-      ("artist", track.artist.clone()),
-      ("duration", track.duration_ms.to_string()),
-    ],
-    api_key,
-    api_secret,
-    &session.session_key,
-  )
-  .await
-}
-
 async fn send_scrobble(session: &LastfmSession, api_key: &str, api_secret: &str, track: &TrackState) -> Result<(), String> {
   let ts = track.started_at as i64 / 1000;
   lastfm_call(
@@ -1403,23 +1340,6 @@ async fn send_scrobble(session: &LastfmSession, api_key: &str, api_secret: &str,
       ("artist[0]", track.artist.clone()),
       ("duration[0]", track.duration_ms.to_string()),
       ("timestamp[0]", ts.to_string()),
-    ],
-    api_key,
-    api_secret,
-    &session.session_key,
-  )
-  .await
-}
-
-async fn clear_now_playing(session: &LastfmSession, api_key: &str, api_secret: &str) -> Result<(), String> {
-  // Hacky: send a 1-second placeholder to effectively clear "Now Playing".
-  // Last.fm rejects empty artist/title, so send a benign filler.
-  lastfm_call(
-    "track.updateNowPlaying",
-    vec![
-      ("track", "Stopped".to_string()),
-      ("artist", "Minimal SC".to_string()),
-      ("duration", "1".to_string()),
     ],
     api_key,
     api_secret,
@@ -1649,9 +1569,6 @@ fn start_playback_server(
                       if let Some(v) = update.enable_scrobble {
                         cfg.enable_scrobble = v;
                       }
-                      if let Some(v) = update.enable_now_playing {
-                        cfg.enable_now_playing = v;
-                      }
                       if let Some(v) = update.enable_notifications {
                         cfg.enable_notifications = v;
                       }
@@ -1664,14 +1581,13 @@ fn start_playback_server(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
                         body
                       );
-                      log::info!(
-                        "[Settings] POST /settings threshold={} scrobble={} now_playing={} notifications={} mode={:?}",
-                        cfg.threshold,
-                        cfg.enable_scrobble,
-                        cfg.enable_now_playing,
-                        cfg.enable_notifications,
-                        cfg.notification_mode
-                      );
+                log::info!(
+                  "[Settings] POST /settings threshold={} scrobble={} notifications={} mode={:?}",
+                  cfg.threshold,
+                  cfg.enable_scrobble,
+                  cfg.enable_notifications,
+                  cfg.notification_mode
+                );
                       let _ = socket.write_all(response.as_bytes()).await;
                       let _ = socket.shutdown().await;
                       return;
@@ -1711,18 +1627,17 @@ fn start_playback_server(
               } else if method == "GET" && path == "/settings" {
                 let cfg = load_scrobble_config(&app_clone);
                 let body = serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string());
-                let response = format!(
-                  "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
-                  body
-                );
-                log::info!(
-                  "[Settings] GET /settings threshold={} scrobble={} now_playing={} notifications={} mode={:?}",
+              let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
+                body
+              );
+              log::info!(
+                  "[Settings] GET /settings threshold={} scrobble={} notifications={} mode={:?}",
                   cfg.threshold,
                   cfg.enable_scrobble,
-                  cfg.enable_now_playing,
                   cfg.enable_notifications,
                   cfg.notification_mode
-                );
+              );
                 let _ = socket.write_all(response.as_bytes()).await;
                 let _ = socket.shutdown().await;
                 return;
@@ -1829,27 +1744,6 @@ pub fn run() {
       {
         start_dev_callback_server(app.handle().clone());
       }
-      // Clear stale now-playing on startup
-      {
-        let app_handle = app.handle().clone();
-        tauri::async_runtime::spawn(async move {
-          let cfg = load_scrobble_config(&app_handle);
-          if !cfg.enable_now_playing {
-            return;
-          }
-          if let (Some(session), Some(api_key), Some(api_secret)) = (
-            get_lastfm_session(&app_handle),
-            lastfm_key(),
-            lastfm_secret(),
-          ) {
-            if let Err(err) = clear_now_playing(&session, &api_key, &api_secret).await {
-              log::warn!("[Last.fm] Failed to clear now playing on startup: {}", err);
-            } else {
-              log::info!("[Last.fm] Cleared now playing on startup");
-            }
-          }
-        });
-      }
       #[cfg(desktop)]
       {
         let handle = app.handle().clone();
@@ -1881,31 +1775,6 @@ pub fn run() {
             });
           }
         });
-        if let Some(win) = handle.get_webview_window("main") {
-          let win_for_close = win.clone();
-          win.on_window_event(move |e| {
-            if let WindowEvent::CloseRequested { .. } = e {
-              let app_handle = win_for_close.app_handle().clone();
-              tauri::async_runtime::spawn(async move {
-                let cfg = load_scrobble_config(&app_handle);
-                if !cfg.enable_now_playing {
-                  return;
-                }
-                if let (Some(session), Some(api_key), Some(api_secret)) = (
-                  get_lastfm_session(&app_handle),
-                  lastfm_key(),
-                  lastfm_secret(),
-                ) {
-                  if let Err(err) = clear_now_playing(&session, &api_key, &api_secret).await {
-                    log::warn!("[Last.fm] Failed to clear now playing on shutdown: {}", err);
-                  } else {
-                    log::info!("[Last.fm] Cleared now playing on shutdown");
-                  }
-                }
-              });
-            }
-          });
-        }
       }
       Ok(())
     })
