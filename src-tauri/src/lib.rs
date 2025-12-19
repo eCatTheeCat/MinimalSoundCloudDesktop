@@ -1153,7 +1153,7 @@ async fn handle_playback(
         cfg.enable_now_playing,
         cfg.enable_notifications
       );
-      let mut t = TrackState {
+      let t = TrackState {
         track_id: payload.track_id.clone(),
         title: payload.title.clone(),
         artist: payload.artist.clone(),
@@ -1413,11 +1413,12 @@ async fn send_scrobble(session: &LastfmSession, api_key: &str, api_secret: &str,
 
 async fn clear_now_playing(session: &LastfmSession, api_key: &str, api_secret: &str) -> Result<(), String> {
   // Hacky: send a 1-second placeholder to effectively clear "Now Playing".
+  // Last.fm rejects empty artist/title, so send a benign filler.
   lastfm_call(
     "track.updateNowPlaying",
     vec![
       ("track", "Stopped".to_string()),
-      ("artist", "".to_string()),
+      ("artist", "Minimal SC".to_string()),
       ("duration", "1".to_string()),
     ],
     api_key,
@@ -1880,10 +1881,11 @@ pub fn run() {
             });
           }
         });
-        if let Some(win) = handle.get_window("main") {
+        if let Some(win) = handle.get_webview_window("main") {
+          let win_for_close = win.clone();
           win.on_window_event(move |e| {
             if let WindowEvent::CloseRequested { .. } = e {
-              let app_handle = win.app_handle().clone();
+              let app_handle = win_for_close.app_handle().clone();
               tauri::async_runtime::spawn(async move {
                 let cfg = load_scrobble_config(&app_handle);
                 if !cfg.enable_now_playing {
