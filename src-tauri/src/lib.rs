@@ -13,6 +13,17 @@ use url::Url;
 const STORE_PATH: &str = "lastfm.json";
 const DEV_CALLBACK_URL: &str = "http://127.0.0.1:35729/callback";
 const DEFAULT_THRESHOLD: f32 = 0.5;
+const AUDIO_AD_HOSTS: &[&str] = &[
+  "ad.doubleclick.net",
+  "reporting.deliveryengine.adswizz.com",
+];
+const AUDIO_AD_PATH_MARKERS: &[&str] = &[
+  "/vast/",
+  "/trackimp/",
+  "/ddm/trackimp/",
+  "/audio-ad",
+  "/ads/",
+];
 
 #[derive(Debug, Deserialize)]
 struct LocalLastfmConfig {
@@ -579,9 +590,82 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
             console.warn('[MSCD] playback endpoint missing, observer disabled');
             return;
           }
+          const blockedHosts = ['ad.doubleclick.net', 'reporting.deliveryengine.adswizz.com'];
+          const blockedPathMarkers = ['/vast/', '/trackimp/', '/ddm/trackimp/', '/audio-ad', '/ads/'];
           let lastPayload = null;
           let logCount = 0;
           let lastLoggedTrack = null;
+          const logAdSkip = (reason) => console.info('[MSCD] Ad skip', reason);
+
+          const shouldBlockUrl = (url) => {
+            try {
+              const u = new URL(url, window.location.href);
+              if (blockedHosts.some((h) => u.hostname.includes(h))) return true;
+              const path = u.pathname.toLowerCase();
+              if (blockedPathMarkers.some((m) => path.includes(m))) return true;
+            } catch (_) {}
+            return false;
+          };
+
+          // fetch interceptor
+          try {
+            const origFetch = window.fetch;
+            window.fetch = (...args) => {
+              const url = args[0];
+              if (typeof url === 'string' && shouldBlockUrl(url)) {
+                console.info('[MSCD] Blocked fetch', url);
+                return Promise.resolve(new Response('', { status: 204 }));
+              }
+              return origFetch.apply(window, args);
+            };
+          } catch (e) {
+            console.warn('[MSCD] fetch interceptor failed', e);
+          }
+
+          // XHR interceptor
+          try {
+            const OrigXHR = window.XMLHttpRequest;
+            function WrappedXHR() {
+              const xhr = new OrigXHR();
+              const origOpen = xhr.open;
+              xhr.open = function(method, url, ...rest) {
+                if (typeof url === 'string' && shouldBlockUrl(url)) {
+                  console.info('[MSCD] Blocked XHR', url);
+                  return origOpen.call(xhr, method, 'about:blank', ...rest);
+                }
+                return origOpen.call(xhr, method, url, ...rest);
+              };
+              return xhr;
+            }
+            window.XMLHttpRequest = WrappedXHR;
+          } catch (e) {
+            console.warn('[MSCD] XHR interceptor failed', e);
+          }
+
+          const skipCurrent = (reason) => {
+            const btn = document.querySelector('.playControls__next');
+            if (btn) {
+              logAdSkip(reason);
+              btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            }
+          };
+
+          const cleanQueue = () => {
+            if (!promoRow.input.checked) return;
+            const container = document.querySelector('.queue__itemsContainer');
+            if (!container) return;
+            const items = Array.from(container.children);
+            items.forEach((node) => {
+              const txt = (node.textContent || '').toLowerCase();
+              if (txt.includes('promoted') || txt.includes('sponsored')) {
+                logAdSkip('promoted queue item removed');
+                node.remove();
+              }
+            });
+          };
+          const queueObserver = new MutationObserver(() => cleanQueue());
+          queueObserver.observe(document.body, { childList: true, subtree: true });
+          cleanQueue();
 
           const grabMeta = () => {
             const toSeconds = (text) => {
@@ -698,6 +782,32 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
               lastLoggedTrack = payload.trackId;
             }
 
+            // ad / promoted detection
+            if (adRow.input.checked) {
+              const missingArtist = !payload.artist || payload.artist.trim() === '';
+              const veryShort = payload.durationMs > 0 && payload.durationMs <= 60000;
+              const titleLow = (payload.title || '').toLowerCase();
+              const trackIdLow = (payload.trackId || '').toLowerCase();
+              const hasMarker = ['advert', ' ad ', 'ad:', 'ad-','sponsor','promo','promotion'].some((m) => titleLow.includes(m));
+              const idMarker = ['ad-', 'audio-ad', 'sponsored'].some((m) => trackIdLow.includes(m));
+              if (idMarker) {
+                skipCurrent('audio ad trackId marker');
+                return;
+              }
+              if ((missingArtist && veryShort) || hasMarker) {
+                skipCurrent('audio ad heuristic');
+                return;
+              }
+              if (logCount < 3) {
+                console.info('[MSCD] Ad check pass', {
+                  trackId: payload.trackId,
+                  title: payload.title,
+                  artist: payload.artist,
+                  durationMs: payload.durationMs,
+                });
+              }
+            }
+
             // avoid spamming identical payloads
             if (lastPayload &&
                 lastPayload.trackId === payload.trackId &&
@@ -790,6 +900,12 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           if (typeof cfg.enable_scrobble === 'boolean') {
             scrobbleToggle.input.checked = cfg.enable_scrobble;
           }
+          if (typeof cfg.skip_audio_ads === 'boolean') {
+            adRow.input.checked = cfg.skip_audio_ads;
+          }
+          if (typeof cfg.skip_promoted === 'boolean') {
+            promoRow.input.checked = cfg.skip_promoted;
+          }
           if (typeof cfg.enable_notifications === 'boolean') {
             notifyRow.input.checked = cfg.enable_notifications;
           }
@@ -802,6 +918,8 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
         const gatherSettings = () => ({
           threshold: Math.max(0.01, Math.min(1, Number(thresholdRow.slider.value) / 100)),
           enable_scrobble: scrobbleToggle.input.checked,
+          skip_audio_ads: adRow.input.checked,
+          skip_promoted: promoRow.input.checked,
           enable_notifications: notifyRow.input.checked,
           notification_mode: notifyModeRow.select.value,
         });
@@ -874,6 +992,8 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           console.info('[MSCD] Settings handlers attached');
           slider?.addEventListener('change', () => { markDirty(); saveSettings(); });
           scrobbleToggle.input.addEventListener('change', () => { markDirty(); saveSettings(); });
+          adRow.input.addEventListener('change', () => { markDirty(); saveSettings(); });
+          promoRow.input.addEventListener('change', () => { markDirty(); saveSettings(); });
           notifyRow.input.addEventListener('change', () => { markDirty(); saveSettings(); });
           notifyModeRow.select.addEventListener('change', () => { markDirty(); saveSettings(); });
         };
@@ -932,13 +1052,15 @@ fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
   if let Some(store) = store {
     if let Some(val) = store.get("scrobble_config") {
       if let Ok(cfg) = serde_json::from_value::<ScrobbleConfig>(val) {
-        // log::info!(
-        //   "[Settings] Loaded scrobble_config threshold={} scrobble={} notifications={} mode={:?}",
-        //   cfg.threshold,
-        //   cfg.enable_scrobble,
-        //   cfg.enable_notifications,
-        //   cfg.notification_mode
-        // );
+        log::info!(
+          "[Settings] Loaded scrobble_config threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?}",
+          cfg.threshold,
+          cfg.enable_scrobble,
+          cfg.skip_audio_ads,
+          cfg.skip_promoted,
+          cfg.enable_notifications,
+          cfg.notification_mode
+        );
         return cfg;
       }
     }
@@ -946,13 +1068,17 @@ fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
   let cfg = ScrobbleConfig {
     threshold: DEFAULT_THRESHOLD,
     enable_scrobble: true,
+    skip_audio_ads: true,
+    skip_promoted: true,
     enable_notifications: true,
     notification_mode: NotificationMode::InApp,
   };
   log::info!(
-    "[Settings] Using default scrobble_config threshold={} scrobble={} notifications={} mode={:?}",
+    "[Settings] Using default scrobble_config threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?}",
     cfg.threshold,
     cfg.enable_scrobble,
+    cfg.skip_audio_ads,
+    cfg.skip_promoted,
     cfg.enable_notifications,
     cfg.notification_mode
   );
@@ -961,9 +1087,11 @@ fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
 
 fn save_scrobble_config(app: &tauri::AppHandle, cfg: &ScrobbleConfig) -> Result<(), String> {
   log::info!(
-    "[Settings] Saving scrobble_config threshold={} scrobble={} notifications={} mode={:?}",
+    "[Settings] Saving scrobble_config threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?}",
     cfg.threshold,
     cfg.enable_scrobble,
+    cfg.skip_audio_ads,
+    cfg.skip_promoted,
     cfg.enable_notifications,
     cfg.notification_mode
   );
@@ -988,12 +1116,28 @@ struct LastfmSession {
   session_key: String,
   username: String,
 }
-#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct ScrobbleConfig {
   threshold: f32,
   enable_scrobble: bool,
+  skip_audio_ads: bool,
+  skip_promoted: bool,
   enable_notifications: bool,
   notification_mode: NotificationMode,
+}
+
+impl Default for ScrobbleConfig {
+  fn default() -> Self {
+    Self {
+      threshold: DEFAULT_THRESHOLD,
+      enable_scrobble: true,
+      skip_audio_ads: true,
+      skip_promoted: true,
+      enable_notifications: true,
+      notification_mode: NotificationMode::InApp,
+    }
+  }
 }
 
 #[derive(Debug, serde::Deserialize, Default)]
@@ -1001,6 +1145,8 @@ struct ScrobbleConfig {
 struct ScrobbleConfigUpdate {
   threshold: Option<f32>,
   enable_scrobble: Option<bool>,
+  skip_audio_ads: Option<bool>,
+  skip_promoted: Option<bool>,
   enable_notifications: Option<bool>,
   notification_mode: Option<NotificationMode>,
 }
@@ -1133,8 +1279,10 @@ async fn handle_playback(
         payload.duration_ms
       );
       log::info!(
-        "[Settings] Using threshold={} notifications={}",
+        "[Settings] Using threshold={} skip_audio_ads={} skip_promoted={} notifications={}",
         cfg.threshold,
+        cfg.skip_audio_ads,
+        cfg.skip_promoted,
         cfg.enable_notifications
       );
       let t = TrackState {
@@ -1577,6 +1725,12 @@ fn start_playback_server(
                       if let Some(v) = update.enable_scrobble {
                         cfg.enable_scrobble = v;
                       }
+                      if let Some(v) = update.skip_audio_ads {
+                        cfg.skip_audio_ads = v;
+                      }
+                      if let Some(v) = update.skip_promoted {
+                        cfg.skip_promoted = v;
+                      }
                       if let Some(v) = update.enable_notifications {
                         cfg.enable_notifications = v;
                       }
@@ -1590,9 +1744,11 @@ fn start_playback_server(
                         body
                       );
                 log::info!(
-                  "[Settings] POST /settings threshold={} scrobble={} notifications={} mode={:?}",
+                  "[Settings] POST /settings threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?}",
                   cfg.threshold,
                   cfg.enable_scrobble,
+                  cfg.skip_audio_ads,
+                  cfg.skip_promoted,
                   cfg.enable_notifications,
                   cfg.notification_mode
                 );
@@ -1640,9 +1796,11 @@ fn start_playback_server(
                 body
               );
               log::info!(
-                  "[Settings] GET /settings threshold={} scrobble={} notifications={} mode={:?}",
+                  "[Settings] GET /settings threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?}",
                   cfg.threshold,
                   cfg.enable_scrobble,
+                  cfg.skip_audio_ads,
+                  cfg.skip_promoted,
                   cfg.enable_notifications,
                   cfg.notification_mode
               );
