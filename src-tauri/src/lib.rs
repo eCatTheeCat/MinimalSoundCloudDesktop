@@ -932,13 +932,13 @@ fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
   if let Some(store) = store {
     if let Some(val) = store.get("scrobble_config") {
       if let Ok(cfg) = serde_json::from_value::<ScrobbleConfig>(val) {
-        log::info!(
-          "[Settings] Loaded scrobble_config threshold={} scrobble={} notifications={} mode={:?}",
-          cfg.threshold,
-          cfg.enable_scrobble,
-          cfg.enable_notifications,
-          cfg.notification_mode
-        );
+        // log::info!(
+        //   "[Settings] Loaded scrobble_config threshold={} scrobble={} notifications={} mode={:?}",
+        //   cfg.threshold,
+        //   cfg.enable_scrobble,
+        //   cfg.enable_notifications,
+        //   cfg.notification_mode
+        // );
         return cfg;
       }
     }
@@ -1494,7 +1494,7 @@ fn start_playback_server(
           continue;
         }
       };
-      log::info!("[Last.fm] Playback server accepted connection");
+      //log::info!("[Last.fm] Playback server accepted connection");
       let app_clone = app_handle.clone();
       let state_clone = state_for_server.clone();
       tauri::async_runtime::spawn(async move {
@@ -1523,7 +1523,7 @@ fn start_playback_server(
               method = parts.next().unwrap_or("").to_string();
               path = parts.next().unwrap_or("").to_string();
             }
-            log::info!("[HTTP] {} {}", method, path);
+            //log::info!("[HTTP] {} {}", method, path);
             for line in headers.split(|b| *b == b'\n') {
               if let Some(pos) = line.iter().position(|b| *b == b':') {
                 let (name, val) = line.split_at(pos);
@@ -1627,7 +1627,7 @@ fn start_playback_server(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
                     body
                   );
-                  log::info!("[Events] GET /events returned {}", events.len());
+                  //log::info!("[Events] GET /events returned {}", events.len());
                   let _ = socket.write_all(response.as_bytes()).await;
                   let _ = socket.shutdown().await;
                   return;
