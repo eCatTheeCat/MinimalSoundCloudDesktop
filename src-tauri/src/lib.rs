@@ -905,6 +905,32 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           shell.dataset.dirty = '';
         };
 
+        const seedDefaultVolume = () => {
+          if (!initialSettings || initialSettings.volume_seeded) return;
+          try {
+            const settingsRaw = localStorage.getItem('V2::local::settings');
+            let settings = settingsRaw ? JSON.parse(settingsRaw) : {};
+            settings.volume = 0.2;
+            settings.muted = false;
+            if (!('showTimeRemaining' in settings)) settings.showTimeRemaining = false;
+            if (!('streamingQuality' in settings)) settings.streamingQuality = null;
+            localStorage.setItem('V2::local::settings', JSON.stringify(settings));
+            const audio = document.querySelector('audio');
+            if (audio) audio.volume = 0.2;
+            console.info('[MSCD] Seeded default volume to 0.2');
+            const payload = gatherSettings();
+            payload.volume_seeded = true;
+            fetch(settingsUrl, {
+              method: 'POST',
+              mode: 'cors',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            }).catch(() => {});
+          } catch (e) {
+            console.warn('[MSCD] Failed to seed default volume', e);
+          }
+        };
+
         const gatherSettings = () => ({
           threshold: Math.max(0.01, Math.min(1, Number(thresholdRow.slider.value) / 100)),
           enable_scrobble: scrobbleToggle.input.checked,
@@ -912,6 +938,7 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           skip_promoted: promoRow.input.checked,
           enable_notifications: notifyRow.input.checked,
           notification_mode: notifyModeRow.select.value,
+          volume_seeded: !!(lastAppliedCfg && lastAppliedCfg.volume_seeded),
         });
 
         const loadSettings = async () => {
@@ -993,6 +1020,9 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
           applySettings(initialSettings);
         }
 
+        // Seed default volume once for new installs.
+        seedDefaultVolume();
+
         // Attach immediately so UI reacts even if load stalls.
         attachHandlers();
         startScrobbleObserver();
@@ -1069,27 +1099,29 @@ fn get_lastfm_session(_app: &tauri::AppHandle) -> Option<LastfmSession> {
 
 fn load_scrobble_config(_app: &tauri::AppHandle) -> ScrobbleConfig {
   let cfg = read_store().scrobble_config;
-  log::info!(
-    "[Settings] Loaded scrobble_config threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?}",
-    cfg.threshold,
-    cfg.enable_scrobble,
-    cfg.skip_audio_ads,
-    cfg.skip_promoted,
-    cfg.enable_notifications,
-    cfg.notification_mode
-  );
+        log::info!(
+          "[Settings] Loaded scrobble_config threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?} volume_seeded={}",
+          cfg.threshold,
+          cfg.enable_scrobble,
+          cfg.skip_audio_ads,
+          cfg.skip_promoted,
+          cfg.enable_notifications,
+          cfg.notification_mode,
+          cfg.volume_seeded
+        );
   cfg
 }
 
 fn save_scrobble_config(_app: &tauri::AppHandle, cfg: &ScrobbleConfig) -> Result<(), String> {
   log::info!(
-    "[Settings] Saving scrobble_config threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?}",
+    "[Settings] Saving scrobble_config threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?} volume_seeded={}",
     cfg.threshold,
     cfg.enable_scrobble,
     cfg.skip_audio_ads,
     cfg.skip_promoted,
     cfg.enable_notifications,
-    cfg.notification_mode
+    cfg.notification_mode,
+    cfg.volume_seeded
   );
   let mut state = read_store();
   state.scrobble_config = cfg.clone();
@@ -1118,6 +1150,7 @@ struct ScrobbleConfig {
   skip_promoted: bool,
   enable_notifications: bool,
   notification_mode: NotificationMode,
+  volume_seeded: bool,
 }
 
 impl Default for ScrobbleConfig {
@@ -1129,6 +1162,7 @@ impl Default for ScrobbleConfig {
       skip_promoted: true,
       enable_notifications: true,
       notification_mode: NotificationMode::InApp,
+      volume_seeded: false,
     }
   }
 }
@@ -1142,6 +1176,7 @@ struct ScrobbleConfigUpdate {
   skip_promoted: Option<bool>,
   enable_notifications: Option<bool>,
   notification_mode: Option<NotificationMode>,
+  volume_seeded: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
@@ -1724,6 +1759,9 @@ fn start_playback_server(
                       }
                       if let Some(v) = update.notification_mode {
                         cfg.notification_mode = v;
+                      }
+                      if let Some(v) = update.volume_seeded {
+                        cfg.volume_seeded = v;
                       }
                       let _ = save_scrobble_config(&app_clone, &cfg);
                       let body = serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string());
