@@ -50,13 +50,14 @@
     - [x] Bad metadata (missing artist/title/duration) → skip scrobble, ~~still allow Now Playing if data is sufficient~~.
 
 ---
-- [ ] Ad handling: playback-aware audio ad skip and promoted-track filtering; wire settings toggles.
+- [x] Interruption handling: playback-aware audio interruption skip and promoted-track filtering:
+  - [x] Wire settings toggles.
+  - [x] Network interceptor to block ad endpoints directly in the webview.
 ---
-- [ ] Notifications: native toast on successful scrobble; toggle-controlled.
+- [x] Settings persistence: load/save all toggles and slider; reflect on launch.
+  - [ ] Keep persistent files near portable exe.
 ---
-- [ ] Settings persistence: load/save all toggles and slider; reflect on launch.
----
-- [ ] Dark mode: injected CSS for SoundCloud + chrome; toggle (optionally system-aware).
+- [ ] Auto-Scroll toggle: Button in ribbon to scroll down to help load the whole page, good for large playlists.
 ---
 - [ ] Tray/menu controls: minimize to tray, tray icon menu (open, play/pause, next/prev, quit).
 ---
@@ -64,4 +65,7 @@
 ---
 - [ ] Discord RPC: let the app talk to discord rpc to show on your profile what your actively listening to.
 ---
-- [ ] Overlay polish: ensure ribbon/modal don’t interfere with the site; keep version display correct in release.
+- [ ] Overlay polish: 
+  - [ ] Ensure ribbon/modal don’t interfere with the site; keep version display correct in release.
+  - [ ] Persistent log files saved to disk after shutdown/crash.
+  - [ ] Keep persistent files near portable exe.

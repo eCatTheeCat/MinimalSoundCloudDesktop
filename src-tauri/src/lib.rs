@@ -1,3 +1,4 @@
+use std::fs;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,23 +8,12 @@ use tauri_plugin_notification::NotificationExt;
 use serde::Deserialize;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
-use tauri_plugin_store::{Store, StoreExt};
+use std::path::PathBuf;
 use url::Url;
 
 const STORE_PATH: &str = "lastfm.json";
 const DEV_CALLBACK_URL: &str = "http://127.0.0.1:35729/callback";
 const DEFAULT_THRESHOLD: f32 = 0.5;
-const AUDIO_AD_HOSTS: &[&str] = &[
-  "ad.doubleclick.net",
-  "reporting.deliveryengine.adswizz.com",
-];
-const AUDIO_AD_PATH_MARKERS: &[&str] = &[
-  "/vast/",
-  "/trackimp/",
-  "/ddm/trackimp/",
-  "/audio-ad",
-  "/ads/",
-];
 
 #[derive(Debug, Deserialize)]
 struct LocalLastfmConfig {
@@ -1036,45 +1026,51 @@ fn build_overlay_script(lastfm_key: &str, lastfm_callback: &str, version: &str, 
     .replace("{initial_settings}", initial_settings)
 }
 
-fn get_store(app: &tauri::AppHandle) -> Result<Arc<Store<tauri::Wry>>, String> {
-  app.store(STORE_PATH).map_err(|e| e.to_string())
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct PersistedState {
+  session: Option<LastfmSession>,
+  scrobble_config: ScrobbleConfig,
 }
 
-fn get_lastfm_session(app: &tauri::AppHandle) -> Option<LastfmSession> {
-  let store = get_store(app).ok()?;
-  store
-    .get("session")
-    .and_then(|v| serde_json::from_value::<LastfmSession>(v).ok())
+fn store_path() -> Result<PathBuf, String> {
+  let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+  let dir = exe
+    .parent()
+    .ok_or_else(|| "Failed to resolve exe directory".to_string())?;
+  Ok(dir.join(STORE_PATH))
 }
 
-fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
-  let store = get_store(app).ok();
-  if let Some(store) = store {
-    if let Some(val) = store.get("scrobble_config") {
-      if let Ok(cfg) = serde_json::from_value::<ScrobbleConfig>(val) {
-        log::info!(
-          "[Settings] Loaded scrobble_config threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?}",
-          cfg.threshold,
-          cfg.enable_scrobble,
-          cfg.skip_audio_ads,
-          cfg.skip_promoted,
-          cfg.enable_notifications,
-          cfg.notification_mode
-        );
-        return cfg;
-      }
+fn read_store() -> PersistedState {
+  let path = match store_path() {
+    Ok(p) => p,
+    Err(err) => {
+      log::warn!("[Store] Failed to resolve path: {}", err);
+      return PersistedState::default();
+    }
+  };
+  if let Ok(text) = fs::read_to_string(&path) {
+    if let Ok(state) = serde_json::from_str::<PersistedState>(&text) {
+      return state;
     }
   }
-  let cfg = ScrobbleConfig {
-    threshold: DEFAULT_THRESHOLD,
-    enable_scrobble: true,
-    skip_audio_ads: true,
-    skip_promoted: true,
-    enable_notifications: true,
-    notification_mode: NotificationMode::InApp,
-  };
+  PersistedState::default()
+}
+
+fn write_store(state: &PersistedState) -> Result<(), String> {
+  let path = store_path()?;
+  let payload = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
+  fs::write(&path, payload).map_err(|e| e.to_string())
+}
+
+fn get_lastfm_session(_app: &tauri::AppHandle) -> Option<LastfmSession> {
+  read_store().session
+}
+
+fn load_scrobble_config(_app: &tauri::AppHandle) -> ScrobbleConfig {
+  let cfg = read_store().scrobble_config;
   log::info!(
-    "[Settings] Using default scrobble_config threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?}",
+    "[Settings] Loaded scrobble_config threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?}",
     cfg.threshold,
     cfg.enable_scrobble,
     cfg.skip_audio_ads,
@@ -1085,7 +1081,7 @@ fn load_scrobble_config(app: &tauri::AppHandle) -> ScrobbleConfig {
   cfg
 }
 
-fn save_scrobble_config(app: &tauri::AppHandle, cfg: &ScrobbleConfig) -> Result<(), String> {
+fn save_scrobble_config(_app: &tauri::AppHandle, cfg: &ScrobbleConfig) -> Result<(), String> {
   log::info!(
     "[Settings] Saving scrobble_config threshold={} scrobble={} skip_audio_ads={} skip_promoted={} notifications={} mode={:?}",
     cfg.threshold,
@@ -1095,12 +1091,9 @@ fn save_scrobble_config(app: &tauri::AppHandle, cfg: &ScrobbleConfig) -> Result<
     cfg.enable_notifications,
     cfg.notification_mode
   );
-  let store = get_store(app)?;
-  store.set(
-    "scrobble_config",
-    serde_json::to_value(cfg).map_err(|e| e.to_string())?,
-  );
-  store.save().map_err(|e| e.to_string())
+  let mut state = read_store();
+  state.scrobble_config = cfg.clone();
+  write_store(&state)
 }
 
 #[tauri::command]
@@ -1111,12 +1104,12 @@ async fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String>
     .map_err(|e| e.to_string())
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 struct LastfmSession {
   session_key: String,
   username: String,
 }
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct ScrobbleConfig {
   threshold: f32,
@@ -1432,11 +1425,9 @@ async fn fetch_lastfm_session(api_key: &str, api_secret: &str, token: &str) -> R
 
 #[tauri::command]
 async fn get_lastfm_status(app: tauri::AppHandle) -> Result<Option<LastfmSession>, String> {
-  let store = get_store(&app)?;
-  if let Some(val) = store.get("session") {
-    let parsed: LastfmSession = serde_json::from_value(val).map_err(|e| e.to_string())?;
-    log::info!("[Last.fm] Returning stored session for user {}", parsed.username);
-    Ok(Some(parsed))
+  if let Some(session) = get_lastfm_session(&app) {
+    log::info!("[Last.fm] Returning stored session for user {}", session.username);
+    Ok(Some(session))
   } else {
     log::info!("[Last.fm] No session stored");
     Ok(None)
@@ -1444,10 +1435,10 @@ async fn get_lastfm_status(app: tauri::AppHandle) -> Result<Option<LastfmSession
 }
 
 #[tauri::command]
-async fn disconnect_lastfm(app: tauri::AppHandle) -> Result<(), String> {
-  let store = get_store(&app)?;
-  store.delete("session");
-  store.save().map_err(|e| e.to_string())
+async fn disconnect_lastfm(_app: tauri::AppHandle) -> Result<(), String> {
+  let mut state = read_store();
+  state.session = None;
+  write_store(&state)
 }
 
 fn sign_lastfm(params: &mut Vec<(&str, String)>, api_secret: &str) -> String {
@@ -1505,7 +1496,7 @@ async fn send_scrobble(session: &LastfmSession, api_key: &str, api_secret: &str,
 }
 
 #[tauri::command]
-async fn complete_lastfm(app: tauri::AppHandle, url: String) -> Result<LastfmSession, String> {
+async fn complete_lastfm(_app: tauri::AppHandle, url: String) -> Result<LastfmSession, String> {
   let parsed = Url::parse(&url).map_err(|e| e.to_string())?;
   let token = parsed
     .query_pairs()
@@ -1525,12 +1516,9 @@ async fn complete_lastfm(app: tauri::AppHandle, url: String) -> Result<LastfmSes
     session.session_key.chars().take(4).collect::<String>()
   );
 
-  let store = get_store(&app)?;
-  store.set(
-    "session",
-    serde_json::to_value(&session).map_err(|e| e.to_string())?,
-  );
-  store.save().map_err(|e| e.to_string())?;
+  let mut state = read_store();
+  state.session = Some(session.clone());
+  write_store(&state)?;
   log::info!("[Last.fm] Session persisted to store");
 
   Ok(session)
@@ -1866,7 +1854,6 @@ pub fn run() {
 
   builder = builder
     .plugin(tauri_plugin_opener::init())
-    .plugin(tauri_plugin_store::Builder::default().build())
     .plugin(tauri_plugin_notification::init())
     .plugin(tauri_plugin_deep_link::init())
     .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
