@@ -1071,6 +1071,14 @@ fn store_path() -> Result<PathBuf, String> {
   Ok(dir.join(STORE_PATH))
 }
 
+fn webview_data_dir() -> Result<PathBuf, String> {
+  let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+  let dir = exe
+    .parent()
+    .ok_or_else(|| "Failed to resolve exe directory".to_string())?;
+  Ok(dir.join("webview-data"))
+}
+
 fn read_store() -> PersistedState {
   let path = match store_path() {
     Ok(p) => p,
@@ -1930,6 +1938,19 @@ pub fn run() {
         log::info!("[Last.fm] Playback server at {}", url);
       } else {
         log::warn!("[Last.fm] Failed to start playback server");
+      }
+      // Create the main window manually so we can set the WebView data directory for portable use.
+      if let Some(conf) = app.config().app.windows.get(0).cloned() {
+        let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &conf)?;
+        if let Ok(dir) = webview_data_dir() {
+          if let Err(err) = fs::create_dir_all(&dir) {
+            log::warn!("[Webview] Failed to create portable data dir {}: {}", dir.display(), err);
+          } else {
+            log::info!("[Webview] Using portable data dir {}", dir.display());
+            builder = builder.data_directory(dir);
+          }
+        }
+        builder.build()?;
       }
       #[cfg(debug_assertions)]
       {
